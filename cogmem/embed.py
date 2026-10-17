@@ -19,9 +19,13 @@ from cogmem.text import ru
 class Embedder(Protocol):
     dim: int
     name: str
+    # Калибровка шкалы косинуса: ниже floor — «не связано», выше ceil — «то же самое».
+    # У разных моделей шкалы очень разные (MiniLM: 0.05…0.8, e5-large: 0.72…0.92).
+    sim_floor: float
+    sim_ceil: float
 
-    def embed(self, texts: Sequence[str]) -> np.ndarray:
-        """Матрица [n, dim], строки нормированы (длина 1)."""
+    def embed(self, texts: Sequence[str], *, query: bool = False) -> np.ndarray:
+        """Матрица [n, dim], строки нормированы (длина 1). query=True — это поисковый запрос."""
 
 
 def _normalize(m: np.ndarray) -> np.ndarray:
@@ -36,6 +40,9 @@ class HashEmbedder:
     Ловит совпадение слов в разных падежах (через стемминг) и частичное совпадение
     (через символьные триграммы). Смысловых синонимов не знает — для этого FastEmbedder.
     """
+
+    sim_floor = 0.0
+    sim_ceil = 0.6
 
     def __init__(self, dim: int = 512):
         self.dim = dim
@@ -53,16 +60,28 @@ class HashEmbedder:
                 v[hg % self.dim] += 0.3 if (hg >> 63) & 1 else -0.3
         return v
 
-    def embed(self, texts: Sequence[str]) -> np.ndarray:
+    def embed(self, texts: Sequence[str], *, query: bool = False) -> np.ndarray:
         if not texts:
             return np.zeros((0, self.dim), dtype=np.float32)
         return _normalize(np.stack([self._vec(t) for t in texts]))
 
 
-class FastEmbedder:
-    """Локальная мультиязычная модель (по умолчанию paraphrase-multilingual-MiniLM-L12-v2, 384 изм.)."""
+# Модель → (префикс запроса, префикс текста, floor, ceil). Калибровка снята на русских парах.
+MODELS = {
+    "intfloat/multilingual-e5-large": ("query: ", "passage: ", 0.74, 0.90),
+    "sentence-transformers/paraphrase-multilingual-mpnet-base-v2": ("", "", 0.10, 0.80),
+    "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2": ("", "", 0.05, 0.80),
+}
 
-    DEFAULT_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+
+class FastEmbedder:
+    """Локальная мультиязычная модель через fastembed (ONNX, CPU).
+
+    По умолчанию multilingual-e5-large: лучшая из проверенных на русских перефразировках
+    («На чём я езжу?» → «Моя машина — Peugeot»), ~15 мс на фразу, ~2.3 ГБ на диске.
+    """
+
+    DEFAULT_MODEL = "intfloat/multilingual-e5-large"
 
     def __init__(self, model_name: str = DEFAULT_MODEL):
         from fastembed import TextEmbedding  # необязательная зависимость
@@ -70,19 +89,23 @@ class FastEmbedder:
         self._model = TextEmbedding(model_name)
         self._lock = threading.Lock()
         self.name = model_name
+        self._qp, self._pp, self.sim_floor, self.sim_ceil = MODELS.get(model_name, ("", "", 0.05, 0.8))
         self.dim = int(self.embed(["проверка"]).shape[1])
 
-    def embed(self, texts: Sequence[str]) -> np.ndarray:
+    def embed(self, texts: Sequence[str], *, query: bool = False) -> np.ndarray:
         if not texts:
             return np.zeros((0, getattr(self, "dim", 384)), dtype=np.float32)
+        prefix = self._qp if query else self._pp
         with self._lock:
-            vecs = list(self._model.embed(list(texts)))
+            vecs = list(self._model.embed([prefix + t for t in texts]))
         return _normalize(np.stack(vecs))
 
 
-def default_embedder() -> Embedder:
+def default_embedder(model_name: str | None = None) -> Embedder:
+    import os
+
     try:
-        return FastEmbedder()
+        return FastEmbedder(model_name or os.environ.get("JARVIS_EMBED_MODEL") or FastEmbedder.DEFAULT_MODEL)
     except Exception:  # нет пакета или модели — работаем, но предупреждаем в логах
         import logging
 

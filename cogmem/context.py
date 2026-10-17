@@ -26,8 +26,13 @@ class Ctx:
     audit: Audit
     jobs: JobQueue
 
-    def embed1(self, text: str) -> np.ndarray:
-        return self.embedder.embed([text])[0]
+    def embed1(self, text: str, *, query: bool = False) -> np.ndarray:
+        return self.embedder.embed([text], query=query)[0]
+
+    def sim01(self, cos: float) -> float:
+        """Косинус → 0..1 по калибровке модели эмбеддингов."""
+        lo, hi = self.embedder.sim_floor, self.embedder.sim_ceil
+        return max(0.0, min(1.0, (cos - lo) / (hi - lo)))
 
     # --- полнотекстовый индекс ---
     def fts_add(self, unit_type: str, unit_id: int, text: str) -> None:

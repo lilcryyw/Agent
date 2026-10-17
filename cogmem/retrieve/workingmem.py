@@ -66,18 +66,39 @@ class WorkingMemory:
         return "\n".join(parts)
 
 
+def _textkey(r: Recalled) -> str:
+    """Ключ для отсева дословных повторов («Какая погода?» десять раз — одно воспоминание)."""
+    from cogmem.text.ru import stems
+
+    body = r.text.split("«", 1)[-1] if "«" in r.text else r.text
+    return " ".join(stems(body.split("»", 1)[0]))
+
+
+def _dedupe(items: list[Recalled]) -> list[Recalled]:
+    seen: set[str] = set()
+    out = []
+    for it in items:  # items уже отсортированы по баллу — остаётся лучший из повторов
+        k = _textkey(it)
+        if k and k in seen:
+            continue
+        seen.add(k)
+        out.append(it)
+    return out
+
+
 def _mmr(items: list[Recalled], ctx: Ctx, lam: float, limit: int) -> list[Recalled]:
     """Maximal Marginal Relevance: жадно берём по баллу, штрафуя похожесть на уже выбранное."""
-    pool = list(items)
+    pool = _dedupe(list(items))
     chosen: list[Recalled] = []
     vecs: list[np.ndarray] = []
     while pool and len(chosen) < limit:
         best_i, best_val = 0, -1e9
         for i, it in enumerate(pool[:60]):
             v = ctx.index.get(it.unit_type, it.unit_id)
-            red = max((float(v @ u) for u in vecs), default=0.0) if v is not None else 0.0
-            if red > 0.95:
-                continue  # почти дословный дубль
+            # Похожесть на уже выбранное — по калибровке модели (шкалы у моделей разные).
+            # Дословные повторы уже отсеяны по тексту; здесь только штраф, не запрет:
+            # «живёт в Самаре» и «переехала в Тольятти» похожи, но оба нужны.
+            red = ctx.sim01(max((float(v @ u) for u in vecs), default=-1.0)) if v is not None else 0.0
             val = lam * it.score - (1 - lam) * red
             if val > best_val:
                 best_i, best_val = i, val
@@ -135,7 +156,12 @@ def pack(ctx: Ctx, result: RecallResult, viewer: str, *, budgets: Budgets | None
         groups.append((ev.score, None, [ev]))
     groups.sort(key=lambda g: -g[0])
     budget = b.episodes
+    seen_keys: set[str] = set()
     for _, ep, quotes in groups:
+        keys = {_textkey(x) for x in ([ep] if ep else []) + quotes}
+        if keys and keys <= seen_keys:
+            continue  # то же самое уже показано другим эпизодом
+        seen_keys |= keys
         lines = ([ep.text] if ep else []) + [q.text for q in quotes]
         cost = sum(estimate_tokens(x) + 5 for x in lines)
         if cost > budget:

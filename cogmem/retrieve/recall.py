@@ -99,7 +99,7 @@ class Retriever:
         now = self.ctx.clock.now()
         if time_range is None:
             time_range = parse_time_range(cue, now, tz)
-        qv = self.ctx.embed1(cue)
+        qv = self.ctx.embed1(cue, query=True)
 
         cos: dict[tuple[str, int], float] = {}
         for t in ("fact", "episode", "event", "entity"):
@@ -152,6 +152,12 @@ class Retriever:
                 v = self.ctx.index.get(key[0], key[1])
                 cos[key] = float(v @ qv) if v is not None else 0.0
         bm_max = max((bm[k_] for k_ in ok if k_ in bm), default=0.0) or 1.0
+        # Смысловая близость = абсолютная (по калибровке модели) + относительная внутри кандидатов:
+        # у разных моделей шкалы разные, а лучшие кандидаты запроса должны получать вес всегда.
+        cvals = [cos.get(k_, 0.0) for k_ in ok]
+        c_lo = float(np.percentile(cvals, 50)) if cvals else 0.0
+        c_hi = max(cvals) if cvals else 1.0
+        span = (c_hi - c_lo) or 1.0
         acts = base_levels(self.ctx, list(ok))
 
         # Эпизоды, из которых выведены факты, позже заменённые новыми: помечаем «устарело частично».
@@ -170,7 +176,9 @@ class Retriever:
         scored: list[Recalled] = []
         for key, m in ok.items():
             c = cos.get(key, 0.0)
-            rel = 0.75 * max(0.0, min(1.0, (c - 0.05) / 0.75)) + 0.25 * (bm.get(key, 0.0) / bm_max)
+            r_ = cfg.relative_sim
+            sem = (1 - r_) * self.ctx.sim01(c) + r_ * max(0.0, (c - c_lo) / span)
+            rel = 0.75 * sem + 0.25 * (bm.get(key, 0.0) / bm_max)
             if key[0] == "entity" and key[1] in seeds:
                 rel = max(rel, 0.8)
             ts = m["ts"] or 0.0

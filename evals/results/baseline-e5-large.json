@@ -1,0 +1,21 @@
+{
+  "mode": "offline-intfloat/multilingual-e5-large",
+  "events": 2176,
+  "episodes": 1151,
+  "load_seconds": 95.9,
+  "accuracy": 1.0,
+  "accuracy_direct": "21/21",
+  "accuracy_paraphrased": "10/10",
+  "by_ability": {
+    "abstention": "2/2",
+    "extraction": "15/15",
+    "multi": "4/4",
+    "privacy": "2/2",
+    "temporal": "4/4",
+    "update": "4/4"
+  },
+  "latency_ms_p50": 67.4,
+  "latency_ms_max": 137.9,
+  "wm_tokens_avg": 642,
+  "failures": []
+}

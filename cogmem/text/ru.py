@@ -103,6 +103,13 @@ _DATE_HINT = re.compile(
     re.IGNORECASE,
 )
 _NUMBER = re.compile(r"\d")
+# Эффект самоотнесённости (Rogers et al., 1977): сведения о себе и близких запоминаются лучше.
+_SELF = re.compile(r"\b(я|мне|меня|мой|моя|моё|мое|мои|моего|моей|моих|мы|нас|наш|наша|наше|наши|у меня|у нас)\b",
+                   re.IGNORECASE)
+# Команды и вопросы к ассистенту — это поручения, а не сведения о жизни.
+_COMMAND = re.compile(
+    r"^\s*(включи|выключи|поставь|найди|переведи|расскажи|покажи|напиши|подскажи|скажи|сколько|какая|какой|какие|"
+    r"как|что|где|когда|почему|зачем|открой|закрой|сделай|дай|предложи)\b", re.IGNORECASE)
 
 
 def is_correction(text: str) -> bool:
@@ -139,6 +146,12 @@ def salience(text: str, *, speaker: str, has_new_entity: bool = False) -> float:
         s += 0.05
     if has_new_entity:
         s += 0.1
+    is_question = text.rstrip().endswith("?") or bool(_COMMAND.search(text))
+    if speaker == "user":
+        if _SELF.search(text) and not is_question:
+            s += 0.15  # рассказ о себе/семье
+        if is_question:
+            s -= 0.1   # поручение ассистенту
     s += 0.2 * abs(emotion(text))
     n = len(words(text))
     if n <= 2:

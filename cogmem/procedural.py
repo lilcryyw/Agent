@@ -56,11 +56,11 @@ class Procedures:
             self.ctx.index.set_active("procedure", procedure_id, False)
         self.ctx.trace("procedure", procedure_id, "used")
 
-    def relevant(self, viewer: str, cue: str, k: int = 2, min_sim: float = 0.45) -> list[str]:
-        qv = self.ctx.embed1(cue)
+    def relevant(self, viewer: str, cue: str, k: int = 2, min_sim: float = 0.55) -> list[str]:
+        qv = self.ctx.embed1(cue, query=True)
         out = []
         for pid, sim in self.ctx.index.search("procedure", qv, viewer, k=k):
-            if sim < min_sim:
+            if self.ctx.sim01(sim) < min_sim:
                 continue
             r = self.ctx.db.one("SELECT name, steps, successes, failures FROM procedures WHERE id=?", (pid,))
             steps = json.loads(r["steps"])

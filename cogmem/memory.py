@@ -42,12 +42,49 @@ from cogmem.vectors import VectorIndex
 log = logging.getLogger(__name__)
 
 
+_REEMBED = [
+    ("events", "id", "text"),
+    ("episodes", "id", "title || '. ' || gist"),
+    ("facts", "id", "statement"),
+    ("entities", "id", "name || CASE WHEN card != '' THEN '. ' || card ELSE '' END"),
+    ("procedures", "id", "name || '. ' || trigger_text"),
+]
+
+
+def _reembed_if_model_changed(db: Database, embedder: Embedder) -> None:
+    """Сменилась модель эмбеддингов → пересчитать все векторы (иначе поиск по смыслу тихо сломается)."""
+    from cogmem.store import to_blob
+
+    row = db.one("SELECT value FROM meta WHERE key='embed_model'")
+    if row is not None and row["value"] == embedder.name:
+        return
+    total = 0
+    for table, pk, expr in _REEMBED:
+        rows = db.query(f"SELECT {pk} AS id, {expr} AS t FROM {table} WHERE embedding IS NOT NULL")
+        for start in range(0, len(rows), 64):
+            chunk = rows[start : start + 64]
+            vecs = embedder.embed([r["t"] or "" for r in chunk])
+            with db.tx():
+                for r, v in zip(chunk, vecs):
+                    if table == "events":  # журнал неизменяем; вектор — не содержимое, временно снимаем защиту
+                        db.execute("DROP TRIGGER IF EXISTS events_append_only")
+                    db.execute(f"UPDATE {table} SET embedding=? WHERE {pk}=?", (to_blob(v), r["id"]))
+            total += len(chunk)
+    if total:
+        db.execute("CREATE TRIGGER IF NOT EXISTS events_append_only BEFORE UPDATE ON events "
+                   "BEGIN SELECT RAISE(ABORT, 'events: журнал только для добавления'); END")
+        log.warning("модель эмбеддингов сменилась на %s — пересчитано %d векторов", embedder.name, total)
+    db.execute("INSERT INTO meta(key, value) VALUES ('embed_model', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+               (embedder.name,))
+
+
 class CognitiveMemory:
     def __init__(self, db_path: str | Path = ":memory:", *, embedder: Embedder | None = None,
                  clock: Clock | None = None, config: MemoryConfig | None = None, llm: StructuredLLM | None = None):
         db = Database(db_path)
         clock = clock or SystemClock()
         embedder = embedder or default_embedder()
+        _reembed_if_model_changed(db, embedder)
         self.ctx = Ctx(db=db, clock=clock, cfg=config or MemoryConfig(), embedder=embedder,
                        index=VectorIndex(db, embedder.dim), audit=Audit(db, clock), jobs=JobQueue(db, clock))
         self.entities = EntityStore(self.ctx)

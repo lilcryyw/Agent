@@ -40,8 +40,9 @@ class MemoryConfig:
     activation_tau: float = -6.0           # «порог» для приведения активации к 0..1
 
     # --- Вспоминание ---
-    candidates_per_source: int = 40
-    min_score: float = 0.18                # ниже — не показываем вовсе
+    candidates_per_source: int = 120        # подобрано на стенде: 40 → 87%, 120 → 100% (e5-large)
+    min_score: float = 0.10                # ниже — не показываем вовсе
+    relative_sim: float = 0.0              # доля относительной (внутри кандидатов) смысловой близости
     mmr_lambda: float = 0.75               # баланс релевантность/разнообразие
     neighbor_episodes: int = 1             # сколько соседних по времени эпизодов подтягивать
     ppr_alpha: float = 0.5                 # вероятность «телепортации» к затравкам в PageRank

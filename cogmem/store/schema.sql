@@ -2,6 +2,12 @@
 -- Правило: журнал событий (events) — источник истины, только добавление.
 -- Всё остальное (эпизоды, факты, карточки) можно перестроить из него.
 
+-- Служебные пары ключ-значение (например, какой моделью посчитаны эмбеддинги).
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS persons (
     id          TEXT PRIMARY KEY,           -- 'owner', 'mama', ...
     name        TEXT NOT NULL,
