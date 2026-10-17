@@ -128,7 +128,7 @@ def test_internal_stimulus_can_stay_silent_and_cannot_grant_keys():
 def test_turn_budget_stops_runaway_loops():
     brain, mem, clock, client = setup(lambda call: response(
         [tool_block("recall", {"query": "что-то", "period": None, "include_outdated": False})], stop="tool_use",
-        inp=200_000))  # каждый шаг ≈ $0.8 на Opus
+        inp=400_000))  # каждый шаг дороже лимита хода при любой модели (проверка не зависит от цены модели)
     r = brain.handle("owner", "Найди всё обо всём")
     assert "Продолжать?" in r.text and len(client.calls) == 2
     # История осталась корректной: на каждый tool_use есть tool_result.
