@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import logging
 import re
 import secrets
@@ -35,6 +36,8 @@ CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # без похожих O/0,
 PAIR_TTL = 15 * 60
 MAX_MSG = 16 * 1024 * 1024
 CLIENT_PATH = Path(__file__).resolve().parents[2] / "clients" / "device" / "jarvis_device.py"
+APK_PATH = Path(os.environ.get("JARVIS_ANDROID_APK",
+                str(Path(__file__).resolve().parents[2] / "clients" / "android" / "jarvis.apk")))
 
 
 def _h(s: str) -> str:
@@ -114,8 +117,16 @@ class Gateway:
             await asyncio.Future()  # навсегда
 
     def _http(self, connection, request):
-        if request.path.rstrip("/").endswith("/client.py"):
+        from websockets.http11 import Response
+        from websockets.datastructures import Headers
+
+        path = request.path.rstrip("/")
+        if path.endswith("/client.py"):
             return connection.respond(200, CLIENT_PATH.read_text(encoding="utf-8"))
+        if path.endswith("/jarvis.apk") and APK_PATH.exists():
+            body = APK_PATH.read_bytes()
+            return Response(200, "OK", Headers([("Content-Type", "application/vnd.android.package-archive"),
+                                                ("Content-Length", str(len(body)))]), body)
         return None
 
     # ------------------------------------------------------------------ соединение

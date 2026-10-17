@@ -367,8 +367,11 @@ class ToolBox:
             return "Шлюз устройств не настроен (JARVIS_DEVICES_URL). Без него устройство не подключить.", True
         code = self.pairing(owner, kind)
         url = self.devices_url.rstrip("/")
-        first = url.split(",")[0].strip().rstrip("/")
-        http = first.replace("wss://", "https://").replace("ws://", "http://") + "/client.py"
+        first_ws = url.split(",")[0].strip().rstrip("/")
+        base = first_ws.replace("wss://", "https://").replace("ws://", "http://")
+        http = base + "/client.py"
+        apk = base + "/jarvis.apk"
+        first = first_ws
         run = f'--server {url} --pair {code} --install'
         steps = {
             "windows": ("В PowerShell:\n"
@@ -376,12 +379,19 @@ class ToolBox:
                         "py -m pip install websockets mss pillow pyautogui vosk sounddevice numpy\n"
                         f"Invoke-WebRequest {http} -OutFile $HOME\\jarvis_device.py\n"
                         f"py $HOME\\jarvis_device.py {run} --voice"),
-            "android": ("Поставить из F-Droid: Termux, Termux:API, Termux:Boot. В Termux:\n"
-                        "pkg install -y python termux-api && pip install websockets\n"
-                        f"curl -o ~/jarvis_device.py {http}\n"
-                        f"python ~/jarvis_device.py {run}\n"
-                        "Если телефон рядом с подключённым ПК — могу сделать большую часть сам через ADB "
-                        "(нужно включить «Отладку по Wi-Fi» и назвать код сопряжения)."),
+            "android": (f"Установи приложение «Джарвис»: открой на телефоне {apk} → разреши установку → "
+                        f"введи адрес {first} и код {code} → нажми «Включить управление» и включи «Джарвис» "
+                        "в списке спец. возможностей. Приложение даёт полное управление (видеть экран, нажимать), "
+                        "SMS, уведомления и работает в фоне.\n"
+                        "ЕСЛИ ТЕЛЕФОН РЯДОМ С ПОДКЛЮЧЁННЫМ ПК — можешь поставить всё сам через device_run на ПК "
+                        "по ADB: пусть человек включит «Отладка по Wi-Fi» (Настройки → Для разработчиков) и "
+                        "продиктует код сопряжения и адрес (порт), затем:\n"
+                        f"  adb pair <адрес:порт> <код>\n  adb connect <адрес:порт>\n"
+                        f"  curl -L -o jarvis.apk {apk} && adb install -r jarvis.apk\n"
+                        "  adb shell settings put secure enabled_accessibility_services "
+                        "ai.jarvis.device/ai.jarvis.device.JarvisAccessibility\n"
+                        "  adb shell settings put secure accessibility_enabled 1\n"
+                        f"  adb shell am start -n ai.jarvis.device/.MainActivity   (ввести адрес {first} и код {code})"),
             "mac": ("В Терминале:\npython3 -m pip install websockets mss pillow pyautogui vosk sounddevice numpy\n"
                     f"curl -o ~/jarvis_device.py {http}\npython3 ~/jarvis_device.py {run} --voice"),
             "linux": ("В терминале:\npython3 -m pip install websockets mss pillow pyautogui vosk sounddevice numpy\n"
