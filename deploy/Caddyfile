@@ -4,5 +4,9 @@
     handle /devices* {
         reverse_proxy jarvis:8765
     }
+    # Вход для iPhone (Команды Siri), веб-приложения и автоматизаций.
+    handle /api* {
+        reverse_proxy jarvis:8780
+    }
     respond "Джарвис на связи" 200
 }

@@ -60,9 +60,22 @@ class Jarvis:
         self.brain = Brain(m, self.s, client, self.tools)
         self._notifiers: list[Notifier] = []
         self.initiative = Initiative(m, m.llm, self.brain.handle_stimulus, self._notify)
+        self.voice = self._make_voice(data)
+        self.api = None
         self._stop = threading.Event()
         self._last_sleep: dict[str, str] = {}
         self._last_initiative = 0.0
+
+    @staticmethod
+    def _make_voice(data: Path):
+        try:
+            import onnx_asr  # noqa: F401
+            import piper  # noqa: F401
+        except Exception:  # noqa: BLE001 — голосовые зависимости не установлены
+            return None
+        from jarvis.voice import Voice
+
+        return Voice(data / "models")
 
     def on_notify(self, fn: Notifier) -> None:
         self._notifiers.append(fn)
@@ -118,6 +131,12 @@ class Jarvis:
         if self.gateway is not None and self.gateway.loop is None:
             self.gateway.start()
             log.info("шлюз устройств слушает порт %s", self.gateway.port)
+        if self.s.api_port and self.api is None:
+            from jarvis.channels.http_api import Api
+
+            self.api = Api(self, port=self.s.api_port, voice=self.voice)
+            self.api.start()
+            log.info("HTTP-API слушает порт %s", self.api.port)
 
         def loop():
             while not self._stop.wait(interval_s):

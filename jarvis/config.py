@@ -49,6 +49,7 @@ class Settings:
     # Шлюз устройств: порт WebSocket и внешний адрес (за Caddy с HTTPS), например wss://jarvis.example.com/devices
     devices_port: int = 8765
     devices_url: str = ""
+    api_port: int = 8780           # HTTP-API для iPhone/веб (0 — выключено)
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -72,6 +73,7 @@ class Settings:
             s.telegram_users[int(tg)] = pid.strip()
         s.devices_port = int(e.get("JARVIS_DEVICES_PORT", s.devices_port))
         s.devices_url = e.get("JARVIS_DEVICES_URL", s.devices_url)
+        s.api_port = int(e.get("JARVIS_API_PORT", s.api_port))
         people = e.get("JARVIS_PEOPLE", "")  # «mama:Ольга Петровна:family:Europe/Samara;papa:...»
         for item in filter(None, (p.strip() for p in people.split(";"))):
             parts = [x.strip() for x in item.split(":")]

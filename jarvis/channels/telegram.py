@@ -16,12 +16,12 @@ from jarvis.runtime import Jarvis
 log = logging.getLogger(__name__)
 
 
-async def run() -> None:
+async def run(j: Jarvis | None = None) -> None:
     from aiogram import Bot, Dispatcher, F
     from aiogram.filters import Command
-    from aiogram.types import Message
+    from aiogram.types import BufferedInputFile, Message
 
-    j = Jarvis()
+    j = j or Jarvis()
     if not j.s.telegram_token:
         raise SystemExit("Нужен TELEGRAM_BOT_TOKEN")
     if not j.s.telegram_users:
@@ -37,7 +37,7 @@ async def run() -> None:
             asyncio.run_coroutine_threadsafe(bot.send_message(tg, "🔔 " + text), loop)
 
     j.on_notify(notify)
-    j.start_background()
+    j.start_background()  # повторный вызов безопасен: шлюз и API запускаются один раз
 
     def person_of(msg: Message) -> str | None:
         return j.s.telegram_users.get(msg.from_user.id) if msg.from_user else None
@@ -75,10 +75,39 @@ async def run() -> None:
         if pid:
             await msg.answer("\n".join(j.keys.lines(pid)) or "Ключей нет.")
 
-    @dp.message(F.voice)
+    @dp.message(Command("token"))
+    async def token(msg: Message) -> None:
+        """Токен для iPhone (Команды Siri) и веб-приложения."""
+        pid = person_of(msg)
+        if pid:
+            from jarvis.channels.http_api import create_token
+
+            t = create_token(j.memory, pid, "telegram")
+            await msg.answer(f"Токен для iPhone: {t}\nВставь его в Команду «Джарвис» (см. docs/iphone.md). "
+                             "Никому не показывай.")
+
+    @dp.message(F.voice | F.audio)
     async def voice(msg: Message) -> None:
-        if person_of(msg):
-            await msg.answer("Голосовые подключу на этапе «Голос». Пока напиши текстом 🙏")
+        pid = person_of(msg)
+        if not pid:
+            return
+        if j.voice is None:
+            await msg.answer("Голос на сервере не настроен (pip install '.[voice]' и ffmpeg). Напиши текстом 🙏")
+            return
+        await bot.send_chat_action(msg.chat.id, "record_voice")
+        f = await bot.get_file((msg.voice or msg.audio).file_id)
+        data = (await bot.download_file(f.file_path)).read()
+        try:
+            heard = await asyncio.to_thread(j.voice.transcribe, data)
+            if not heard:
+                await msg.answer("Не расслышал, повтори, пожалуйста.")
+                return
+            r = await asyncio.to_thread(j.brain.handle, pid, heard, channel="voice")
+            audio, _ = await asyncio.to_thread(j.voice.speak, r.text, "ogg")
+            await msg.answer_voice(BufferedInputFile(audio, "jarvis.ogg"), caption=r.text[:1000])
+        except Exception:  # noqa: BLE001
+            log.exception("ошибка голосового хода")
+            await msg.answer("Не получилось обработать голосовое, попробуй ещё раз.")
 
     @dp.message(F.text)
     async def text(msg: Message) -> None:

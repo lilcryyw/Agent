@@ -304,3 +304,12 @@ CREATE TABLE IF NOT EXISTS pairings (
     expires_at  REAL NOT NULL,
     used_at     REAL
 );
+
+-- Токены доступа к HTTP-API (iPhone «Команды», веб-приложение). Хранятся хешами.
+CREATE TABLE IF NOT EXISTS api_tokens (
+    token_hash  TEXT PRIMARY KEY,
+    person_id   TEXT NOT NULL,
+    name        TEXT NOT NULL DEFAULT '',
+    created_at  REAL NOT NULL,
+    revoked_at  REAL
+);
