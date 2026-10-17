@@ -84,11 +84,20 @@ class JarvisAccessibility : AccessibilityService() {
     }
 
     fun global(action: String): Boolean {
+        if (action == "enter") {  // «Ввод» в поле — отправить/искать (Android 11+)
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return false
+            val node = findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return false
+            return node.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)
+        }
         val code = when (action) {
             "back" -> GLOBAL_ACTION_BACK
             "home" -> GLOBAL_ACTION_HOME
             "recents" -> GLOBAL_ACTION_RECENTS
             "notifications" -> GLOBAL_ACTION_NOTIFICATIONS
+            "quick_settings" -> GLOBAL_ACTION_QUICK_SETTINGS
+            "power" -> GLOBAL_ACTION_POWER_DIALOG
+            "lock" -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) GLOBAL_ACTION_LOCK_SCREEN else return false
+            "screenshot" -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) GLOBAL_ACTION_TAKE_SCREENSHOT else return false
             else -> return false
         }
         return performGlobalAction(code)

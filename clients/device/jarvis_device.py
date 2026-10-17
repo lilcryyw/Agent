@@ -2,7 +2,8 @@
 """Клиент Джарвиса для устройства: Windows, macOS, Linux, Android (через Termux).
 
 Один файл. Нужно: Python 3.10+ и `pip install websockets`. По желанию (экран и мышь на ПК):
-`pip install mss pillow pyautogui`.
+`pip install mss pillow pyautogui pyperclip send2trash` (pyperclip — печать кириллицы на Mac/Linux,
+send2trash — удаление в корзину, обратимое).
 
 Первое подключение (код выдаёт Джарвис):
     python jarvis_device.py --server wss://ВАШ-СЕРВЕР/devices --pair ABCD-EFGH --name "Ноутбук" --install
@@ -226,24 +227,93 @@ def speak(text: str, audio_b64: str | None) -> None:
 _scale = 1.0  # во сколько раз снимок меньше реального экрана
 
 
-def run_code(language: str, code: str, timeout: float) -> tuple[bool, str]:
+_procs: dict[str, subprocess.Popen] = {}   # выполняющиеся вызовы: id → процесс (для «стоп»)
+_cancelled: set[str] = set()
+
+
+def _kill_tree(p: subprocess.Popen) -> None:
+    """Убить процесс со всеми потомками (установщики, браузеры), а не только оболочку."""
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)], capture_output=True, timeout=20)
+        else:
+            import signal
+
+            os.killpg(p.pid, signal.SIGKILL)
+    except Exception:  # noqa: BLE001
+        try:
+            p.kill()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _clip(s: str, limit: int = MAX_OUT) -> str:
+    if len(s) <= limit:
+        return s
+    head = limit // 3
+    return s[:head] + f"\n…[обрезано {len(s) - limit} симв.]…\n" + s[-(limit - head):]
+
+
+PS_UTF8 = ("[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; "
+           "$OutputEncoding=[System.Text.Encoding]::UTF8; ")
+
+
+def run_code(language: str, code: str, timeout: float, env: dict | None = None,
+             call_id: str | None = None) -> tuple[bool, str]:
+    penv = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8", **{str(k): str(v) for k, v in (env or {}).items()}}
+    tmp = None
     if language == "python":
         with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False, encoding="utf-8") as f:
             f.write(code)
-        cmd = [sys.executable, f.name]
+        tmp = f.name
+        cmd = [sys.executable, tmp]
     elif language == "powershell":
-        cmd = ["powershell", "-NoProfile", "-NonInteractive", "-Command", code]
+        # Русская Windows по умолчанию отдаёт вывод в cp866 — просим UTF-8, иначе кириллица превращается в мусор.
+        cmd = ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", PS_UTF8 + code]
     else:
         cmd = [shutil.which("bash") or "sh", "-c", code]
+    kw = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=str(Path.home()),
-                           encoding="utf-8", errors="replace")
-        out = (p.stdout or "") + (("\n[stderr]\n" + p.stderr) if p.stderr else "")
-        return p.returncode == 0, f"код выхода {p.returncode}\n{out[-MAX_OUT:]}"
-    except subprocess.TimeoutExpired:
-        return False, f"превышено время {timeout:.0f} с"
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
+                             cwd=str(Path.home()), env=penv, **kw)
     except FileNotFoundError as e:
+        if tmp:
+            os.unlink(tmp)
         return False, f"не найдено: {e}"
+    if call_id:
+        _procs[call_id] = p
+    timed_out = False
+    try:
+        try:
+            out_b, err_b = p.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            _kill_tree(p)
+            out_b, err_b = p.communicate()
+    finally:
+        if call_id:
+            _procs.pop(call_id, None)
+        if tmp:  # в файле могли быть подставленные секреты — не оставляем его на диске
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+    out = out_b.decode("utf-8", errors="replace")
+    err = err_b.decode("utf-8", errors="replace")
+    text = out + (("\n[stderr]\n" + err) if err else "")
+    if call_id and call_id in _cancelled:
+        _cancelled.discard(call_id)
+        return False, "остановлено по просьбе человека\n" + _clip(text)
+    if timed_out:
+        return False, f"превышено время {timeout:.0f} с (процесс остановлен)\n" + _clip(text)
+    return p.returncode == 0, f"код выхода {p.returncode}\n{_clip(text)}"
+
+
+def cancel_call(call_id: str) -> None:
+    p = _procs.get(call_id)
+    if p is not None:
+        _cancelled.add(call_id)
+        _kill_tree(p)
 
 
 def screenshot() -> tuple[bool, str, str | None]:
@@ -264,23 +334,102 @@ def screenshot() -> tuple[bool, str, str | None]:
         base64.b64encode(buf.getvalue()).decode()
 
 
+def _type_unicode_win(text: str) -> None:
+    """Печать любого текста (кириллица, эмодзи) в Windows через SendInput с KEYEVENTF_UNICODE."""
+    import ctypes
+    import struct
+    from ctypes import wintypes
+
+    class KEYBDINPUT(ctypes.Structure):
+        _fields_ = [("wVk", wintypes.WORD), ("wScan", wintypes.WORD), ("dwFlags", wintypes.DWORD),
+                    ("time", wintypes.DWORD), ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
+
+    class MOUSEINPUT(ctypes.Structure):
+        _fields_ = [("dx", wintypes.LONG), ("dy", wintypes.LONG), ("mouseData", wintypes.DWORD),
+                    ("dwFlags", wintypes.DWORD), ("time", wintypes.DWORD),
+                    ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
+
+    class _U(ctypes.Union):
+        _fields_ = [("ki", KEYBDINPUT), ("mi", MOUSEINPUT)]
+
+    class INPUT(ctypes.Structure):
+        _fields_ = [("type", wintypes.DWORD), ("u", _U)]
+
+    for ch in text:
+        raw = ch.encode("utf-16-le")
+        for unit in struct.unpack(f"<{len(raw) // 2}H", raw):
+            for flags in (0x4, 0x4 | 0x2):  # KEYEVENTF_UNICODE, + KEYEVENTF_KEYUP
+                inp = INPUT(type=1, u=_U(ki=KEYBDINPUT(0, unit, flags, 0, None)))
+                ctypes.windll.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+        time.sleep(0.01)
+
+
+def type_text(text: str) -> tuple[bool, str]:
+    """pyautogui.write умеет только латиницу (остальное молча пропускает) — для прочего другие пути."""
+    import pyautogui
+
+    if text.isascii():
+        pyautogui.write(text, interval=0.02)
+        return True, "сделано"
+    if os.name == "nt":
+        _type_unicode_win(text)
+        return True, "сделано"
+    try:
+        import pyperclip
+
+        try:
+            old = pyperclip.paste()
+        except Exception:  # noqa: BLE001
+            old = None
+        pyperclip.copy(text)
+        pyautogui.hotkey("command" if detect_kind() == "mac" else "ctrl", "v")
+        time.sleep(0.3)
+        if old is not None:
+            pyperclip.copy(old)
+        return True, "сделано (через буфер обмена)"
+    except ImportError:
+        pass
+    if shutil.which("xdotool"):
+        subprocess.run(["xdotool", "type", "--delay", "20", text], timeout=60)
+        return True, "сделано"
+    return False, "не могу напечатать не-латиницу: на устройстве нужно pip install pyperclip"
+
+
+PC_KEYS = {"back": ["alt", "left"], "recents": ["alt", "tab"], "notifications": ["win", "a"]}
+
+
 def do_input(a: dict) -> tuple[bool, str]:
     import pyautogui
 
     pyautogui.FAILSAFE = True  # мышь в угол экрана — аварийная остановка
     act = a.get("action")
-    x = a.get("x")
-    y = a.get("y")
-    if x is not None and y is not None:
-        x, y = int(x * _scale), int(y * _scale)
+
+    def pt(kx: str, ky: str):
+        x, y = a.get(kx), a.get(ky)
+        return (int(x * _scale), int(y * _scale)) if x is not None and y is not None else (None, None)
+
+    x, y = pt("x", "y")
     if act in ("click", "double_click", "right_click", "move"):
         fn = {"click": pyautogui.click, "double_click": pyautogui.doubleClick,
               "right_click": pyautogui.rightClick, "move": pyautogui.moveTo}[act]
         fn(x, y)
+    elif act == "long_press":
+        pyautogui.moveTo(x, y)
+        pyautogui.mouseDown()
+        time.sleep(0.8)
+        pyautogui.mouseUp()
+    elif act in ("drag", "swipe"):
+        x2, y2 = pt("x2", "y2")
+        pyautogui.moveTo(x, y)
+        pyautogui.dragTo(x2, y2, duration=max(float(a.get("ms") or 400) / 1000, 0.1), button="left")
     elif act == "type":
-        pyautogui.write(a.get("text") or "", interval=0.02)
+        return type_text(a.get("text") or "")
     elif act == "key":
-        keys = [k.strip() for k in (a.get("keys") or "").split("+") if k.strip()]
+        raw = (a.get("keys") or "").strip().lower()
+        keys = PC_KEYS.get(raw) or [k.strip() for k in raw.split("+") if k.strip()]
+        unknown = [k for k in keys if k not in pyautogui.KEYBOARD_KEYS]
+        if unknown or not keys:
+            return False, f"неизвестные клавиши: {', '.join(unknown) or raw}"
         pyautogui.hotkey(*keys)
     elif act == "scroll":
         pyautogui.scroll(int(a.get("amount") or -5), x=x, y=y)
@@ -295,7 +444,8 @@ async def handle(ws, msg: dict) -> None:
     image = None
     try:
         if msg["action"] == "run":
-            ok, out = await asyncio.to_thread(run_code, a.get("language", "python"), a.get("code", ""), timeout)
+            ok, out = await asyncio.to_thread(run_code, a.get("language", "python"), a.get("code", ""), timeout,
+                                              a.get("env"), str(msg.get("id")))
         elif msg["action"] == "screenshot":
             ok, out, image = await asyncio.to_thread(screenshot)
         elif msg["action"] == "input":
@@ -412,6 +562,8 @@ async def session(server: str, first: dict, utterances: asyncio.Queue | None = N
                     t = asyncio.create_task(handle(ws, msg))
                     tasks.add(t)
                     t.add_done_callback(tasks.discard)
+                elif msg.get("type") == "cancel":
+                    cancel_call(str(msg.get("id")))
                 elif msg.get("type") == "say":
                     print(f"Джарвис: {msg.get('text', '')}")
                     asyncio.create_task(asyncio.to_thread(speak, msg.get("text", ""), msg.get("audio_b64")))

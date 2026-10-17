@@ -99,9 +99,93 @@ class Workshop(Protocol):
             cancel: threading.Event | None = None, keep: bool = True) -> RunResult: ...
 
 
-def _limits(mem_mb: int) -> None:  # выполняется в дочернем процессе
+# --- Landlock: файловая «клетка» без root и без пространств имён (Linux 5.13+) ---
+_LL_READ = 1 | 4 | 8            # EXECUTE | READ_FILE | READ_DIR
+_LL_FILE = 1 | 2 | 4            # права, допустимые для файла (не папки)
+_LL_ALL = (1 << 13) - 1         # все права ABI 1
+
+
+def _landlock_plan(hide: list[Path], writable: list[Path], readable: list[Path]) -> list[tuple[str, int]] | None:
+    """Правила «читать всё, кроме hide; писать — только writable». → [(путь, права)] или None."""
+    if not hide:
+        return None
+    hide = [h.resolve() for h in hide]
+    blocked: set[Path] = set()
+    for h in hide:
+        blocked |= {h, *h.parents}
+    rules: list[tuple[str, int]] = []
+    for anc in sorted(blocked - set(hide), key=lambda x: len(x.parts)):
+        try:
+            children = list(anc.iterdir())
+        except OSError:
+            continue
+        for c in children:
+            if c in blocked:
+                continue
+            rules.append((str(c), _LL_READ if c.is_dir() else _LL_READ & _LL_FILE))
+    rules += [(str(p.resolve()), _LL_READ) for p in readable if p.exists()]
+    rules += [(str(p.resolve()), _LL_ALL) for p in writable if p.exists()]
+    for extra in ("/dev", "/tmp", "/dev/shm"):
+        if os.path.isdir(extra) and Path(extra).resolve() not in blocked:  # предок спрятанного — не открываем
+            rules.append((extra, _LL_ALL))
+    return rules
+
+
+class _Landlock:
+    """Загружается в родителе (ctypes), применяется в дочернем процессе перед exec — только системные вызовы."""
+
+    def __init__(self) -> None:
+        import ctypes
+        import platform
+
+        self.ok = False
+        if sys.platform != "linux" or platform.machine() not in ("x86_64", "aarch64", "amd64", "arm64"):
+            return
+        self.ctypes = ctypes
+        self.libc = ctypes.CDLL(None, use_errno=True)
+        self.libc.syscall.restype = ctypes.c_long
+        abi = self.libc.syscall(444, None, ctypes.c_size_t(0), ctypes.c_uint32(1))  # LANDLOCK_CREATE_RULESET_VERSION
+        self.ok = abi >= 1
+
+    def apply(self, rules: list[tuple[str, int]]) -> None:
+        c = self.ctypes
+        attr = c.c_uint64(_LL_ALL)
+        fd = self.libc.syscall(444, c.byref(attr), c.c_size_t(8), c.c_uint32(0))
+        if fd < 0:
+            return
+        buf = (c.c_char * 12)()
+        for path, access in rules:
+            try:
+                pfd = os.open(path, os.O_PATH | os.O_CLOEXEC)
+            except OSError:
+                continue
+            c.memmove(buf, c.byref(c.c_uint64(access)), 8)
+            c.memmove(c.addressof(buf) + 8, c.byref(c.c_int32(pfd)), 4)
+            self.libc.syscall(445, c.c_int(fd), c.c_int(1), buf, c.c_uint32(0))
+            os.close(pfd)
+        self.libc.prctl(38, 1, 0, 0, 0)  # PR_SET_NO_NEW_PRIVS
+        self.libc.syscall(446, c.c_int(fd), c.c_uint32(0))
+        os.close(fd)
+
+
+_LANDLOCK: _Landlock | None = None
+
+
+def _landlock() -> _Landlock | None:
+    global _LANDLOCK
+    if _LANDLOCK is None:
+        try:
+            _LANDLOCK = _Landlock()
+        except Exception:  # noqa: BLE001
+            return None
+    return _LANDLOCK if _LANDLOCK.ok else None
+
+
+def _limits(mem_mb: int, ll: _Landlock | None = None, rules: list | None = None) -> None:  # в дочернем процессе
     import resource
 
+    if ll is not None and rules:
+        ll.apply(rules)
     # RLIMIT_DATA, а не RLIMIT_AS: браузеры, Node, JVM резервируют огромное виртуальное пространство
     # (без реальной памяти) и под RLIMIT_AS просто не стартуют.
     lim = mem_mb * 1024 * 1024
@@ -189,6 +273,15 @@ class LocalWorkshop:
     def sandboxed(self) -> bool:
         return _bwrap_works()
 
+    @property
+    def isolation(self) -> str:
+        """Как спрятаны данные сервера от кода мастерской: bwrap | landlock | none."""
+        if self.sandboxed:
+            return "bwrap"
+        if self.hide and _landlock() is not None:
+            return "landlock"
+        return "none"
+
     def _cmd(self, work: Path) -> list[str]:
         base = [self.python, "main.py"]
         if not self.sandboxed:
@@ -240,9 +333,14 @@ class LocalWorkshop:
             out_f, err_f = logs / "out", logs / "err"
             t0 = time.perf_counter()
             cancelled = timed_out = False
+            ll = rules = None
+            if not self.sandboxed and self.hide:
+                ll = _landlock()
+                if ll is not None:
+                    rules = _landlock_plan(self.hide, [self.root, work], [self.skills_dir, Path(self.python).parent])
             with open(out_f, "wb") as fo, open(err_f, "wb") as fe:
                 proc = subprocess.Popen(self._cmd(work), cwd=work, env=penv, stdout=fo, stderr=fe,
-                                        stdin=subprocess.DEVNULL, preexec_fn=lambda: _limits(self.mem_mb))
+                                        stdin=subprocess.DEVNULL, preexec_fn=lambda: _limits(self.mem_mb, ll, rules))
                 while True:
                     try:
                         proc.wait(timeout=0.2)

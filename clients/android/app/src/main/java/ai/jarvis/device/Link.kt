@@ -102,6 +102,7 @@ class Link(private val ctx: Context, private val onLog: (String) -> Unit) {
                     return
                 }
                 if (msg.optString("type") == "call") handleCall(msg)
+                else if (msg.optString("type") == "cancel") Actions.cancel(msg.optString("id"))
                 else if (msg.optString("type") == "say") Speech.speak(ctx, msg.optString("text"), msg.optString("audio_b64", null))
             }
             override fun onClose(code: Int, reason: String?, remote: Boolean) { if (!gotFirst) onFirst(null) }
@@ -132,7 +133,8 @@ class Link(private val ctx: Context, private val onLog: (String) -> Unit) {
         val action = msg.getString("action")
         val args = msg.optJSONObject("args") ?: JSONObject()
         Thread {
-            val result = Actions.run(ctx, action, args)
+            val timeout = msg.optDouble("timeout", 120.0).toLong().coerceIn(5L, 7200L)
+            val result = Actions.run(ctx, action, args, id, timeout)
             ws?.takeIf { it.isOpen }?.send(JSONObject().apply {
                 put("type", "result"); put("id", id)
                 put("ok", result.ok); put("output", result.output)

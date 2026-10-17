@@ -23,12 +23,12 @@ from cogmem.core import CoreBlocks
 from cogmem.embed import Embedder, default_embedder
 from cogmem.entities import EntityStore
 from cogmem.episodes import EpisodeStream, ObserveResult
-from cogmem.facts import FactStore
+from cogmem.facts import FactStore, scrub_audit
 from cogmem.goals import Goals
 from cogmem.govern.access import can_see
 from cogmem.govern.audit import Audit
-from cogmem.govern.write_gate import GateReport, WriteGate
-from cogmem.jobs import JobQueue
+from cogmem.govern.write_gate import GateReport, WriteGate, is_secret
+from cogmem.jobs import JobDeferred, JobQueue
 from cogmem.llm import StructuredLLM, cost_usd
 from cogmem.procedural import Procedures
 from cogmem.prospective import Intentions
@@ -60,20 +60,23 @@ def _reembed_if_model_changed(db: Database, embedder: Embedder) -> None:
     if row is not None and row["value"] == embedder.name:
         return
     total = 0
-    for table, pk, expr in _REEMBED:
-        rows = db.query(f"SELECT {pk} AS id, {expr} AS t FROM {table} WHERE embedding IS NOT NULL")
-        for start in range(0, len(rows), 64):
-            chunk = rows[start : start + 64]
-            vecs = embedder.embed([r["t"] or "" for r in chunk])
-            with db.tx():
-                for r, v in zip(chunk, vecs):
+    try:
+        for table, pk, expr in _REEMBED:
+            rows = db.query(f"SELECT {pk} AS id, {expr} AS t FROM {table} WHERE embedding IS NOT NULL")
+            for start in range(0, len(rows), 64):
+                chunk = rows[start : start + 64]
+                vecs = embedder.embed([r["t"] or "" for r in chunk])
+                with db.tx():
                     if table == "events":  # журнал неизменяем; вектор — не содержимое, временно снимаем защиту
                         db.execute("DROP TRIGGER IF EXISTS events_append_only")
-                    db.execute(f"UPDATE {table} SET embedding=? WHERE {pk}=?", (to_blob(v), r["id"]))
-            total += len(chunk)
-    if total:
+                    for r, v in zip(chunk, vecs):
+                        db.execute(f"UPDATE {table} SET embedding=? WHERE {pk}=?", (to_blob(v), r["id"]))
+                total += len(chunk)
+    finally:
+        # Защита журнала возвращается всегда — даже если пересчёт упал на середине.
         db.execute("CREATE TRIGGER IF NOT EXISTS events_append_only BEFORE UPDATE ON events "
                    "BEGIN SELECT RAISE(ABORT, 'events: журнал только для добавления'); END")
+    if total:
         log.warning("модель эмбеддингов сменилась на %s — пересчитано %d векторов", embedder.name, total)
     db.execute("INSERT INTO meta(key, value) VALUES ('embed_model', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                (embedder.name,))
@@ -157,18 +160,32 @@ class CognitiveMemory:
             raise RuntimeError("нет модели для подсознания")
         episode_id = int(payload["episode_id"])
         ep = self.episodes.get(episode_id)
-        if ep is None or ep.status == "encoded":
-            return  # идемпотентность
-        built = self.encoder.build_prompt(episode_id)
+        if ep is None or ep.status != "closed":
+            return  # идемпотентность: уже закодирован (или удалён)
+        # Строго по порядку времени для каждого человека: иначе более старый эпизод, закодированный
+        # после сбоя позже, «заменил» бы более новое знание.
+        blocker = self.ctx.db.scalar(
+            "SELECT e.id FROM episodes e JOIN jobs j ON j.key = 'encode:' || e.id WHERE e.person_id=? "
+            "AND e.level='episode' AND e.status='closed' AND e.id!=? AND (e.start_ts<? OR (e.start_ts=? AND e.id<?)) "
+            "AND j.status IN ('pending','running') LIMIT 1",
+            (ep.person_id, episode_id, ep.start_ts, ep.start_ts, episode_id))
+        if blocker is not None:
+            raise JobDeferred(f"ждёт более ранний эпизод E{blocker}", delay=30)
+        events = self.encoder.events_for_encoding(episode_id)
+        why = self.encoder.is_trivial(events) if events else "нет реплик"
+        if why:
+            self.gate.mark_encoded_without_llm(episode_id, why)
+            return
+        built = self.encoder.build_prompt(episode_id)  # промпт строится один раз
         if built is None:
             return
-        enc = self.encoder.encode(episode_id)
-        if enc is None:
-            return
-        _, events = built
+        user, events = built
+        enc = self.encoder.encode_prompt(user)
         rep: GateReport = self.gate.apply_encoding(episode_id, enc, events)
-        log.info("эпизод E%s закодирован: +%s фактов, заменено %s, отклонено %s", episode_id,
-                 len(rep.facts_added), len(rep.facts_superseded), len(rep.rejected))
+        # Эпизод мог попасть в уже готовую сводку периода (кодирование после сбоя) — пересобрать её во «сне».
+        self.sleeper.mark_stale(ep.person_id, ep.start_ts)
+        log.info("эпизод E%s закодирован: +%s фактов, заменено %s, на проверке %s, отклонено %s", episode_id,
+                 len(rep.facts_added), len(rep.facts_superseded), len(rep.facts_pending), len(rep.rejected))
 
     def tick(self, *, encode: bool = True, limit: int = 20) -> dict:
         """Периодический «пульс»: закрыть затихшие эпизоды, закодировать закрытые."""
@@ -188,41 +205,111 @@ class CognitiveMemory:
             self.episodes.close(r["id"], reason="принудительно")
         return self.tick(limit=1000)
 
+    def requeue_unencoded(self, person_id: str | None = None) -> int:
+        """Вернуть в очередь всё закрытое, но не закодированное (упавшие задачи, потерянные задачи)."""
+        rows = self.ctx.db.query(
+            "SELECT id FROM episodes WHERE status='closed' AND level='episode'" + (" AND person_id=?" if person_id else ""),
+            (person_id,) if person_id else ())
+        n = 0
+        for r in rows:
+            n += self.ctx.jobs.enqueue("encode_episode", f"encode:{r['id']}", {"episode_id": r["id"]}, reset=True)
+        return n
+
     def sleep(self, person_id: str) -> dict:
+        self.requeue_unencoded(person_id)
         self.tick(limit=1000)
         return self.sleeper.run(person_id)
 
     # ------------------------------------------------------------------ явные операции
     def remember(self, person_id: str, statement: str, *, about: str | None = None, importance: float = 0.7,
                  share_with_family: bool = False, source_event_id: int | None = None) -> int:
-        """«Запомни…» — прямая запись факта со слов человека (минуя ночную обработку)."""
+        """«Запомни…» — прямая запись факта со слов человека (минуя ночную обработку), но через шлюз записи:
+        фильтр секретов, дубли, слоты, привязка к эпизоду. Секрет → ValueError (для них есть хранилище)."""
+        statement = statement.strip()
+        if is_secret(statement):
+            raise ValueError("пароли, коды доступа и номера карт в память не записываю — для них есть хранилище секретов")
         p = self.person(person_id)
         subject = p["entity_id"] if not about or about.strip().lower() in {"я", "меня", "мне"} else \
             self.entities.get_or_create(about, viewer=person_id, reason="запомни")
-        return self.facts.add(
-            subject_id=subject, predicate="заметка", statement=statement, owner=person_id,
-            confidence=0.95, importance=max(0.0, min(1.0, importance)), source_kind="user_stated",
-            source_event_ids=[source_event_id] if source_event_id else [],
-            visibility="family" if share_with_family else "private", actor="brain", reason="просьба запомнить")
+        ev = self.ctx.db.one("SELECT ts, episode_id FROM events WHERE id=? AND person_id=?",
+                             (source_event_id, person_id)) if source_event_id else None
+        episode_id = ev["episode_id"] if ev else self.current_episode_id(person_id)
+        self.ctx.prefetch([statement])
+        visibility = "family" if share_with_family else "private"
+        fid = self.gate.write_fact(
+            person_id=person_id, subject_id=subject, predicate="заметка", statement=statement,
+            source_kind="user_stated", confidence=0.95, importance=max(0.0, min(1.0, importance)),
+            evidence=[source_event_id] if ev else [], episode_id=episode_id,
+            observed_at=ev["ts"] if ev else self.ctx.clock.now(), visibility=visibility, actor="brain",
+            reason="просьба запомнить")
+        f = self.facts.get(fid)
+        if f is not None and share_with_family and f.visibility != "family" and f.owner_person == person_id:
+            self.ctx.db.execute("UPDATE facts SET visibility='family' WHERE id=?", (fid,))
+            self.ctx.index.set_visibility("fact", fid, "family")
+        return fid
 
     def correct(self, person_id: str, unit_ref: str, new_statement: str) -> int | None:
-        """«Нет, не так…» — заменить факт исправленным (старый остаётся в истории)."""
+        """«Нет, не так…» — заменить факт исправленным (старый остаётся в истории).
+        Если ссылка на уже устаревшую версию — исправляется её актуальная версия (иначе было бы два «текущих»)."""
         u = parse_ref(unit_ref)
-        if not u or u[0] != "fact":
+        if not u or u[0] != "fact" or not new_statement.strip():
             return None
         old = self.facts.get(u[1])
         if old is None or not self.facts.visible(old, person_id):
             return None
-        new_id = self.facts.add(
-            subject_id=old.subject_id, predicate=old.predicate, statement=new_statement, owner=old.owner_person,
-            object_id=old.object_id, confidence=0.95, importance=old.importance, source_kind="user_stated",
-            source_event_ids=old.source_event_ids, visibility=old.visibility, actor="user",
-            reason=f"исправление {unit_ref}")
-        self.facts.invalidate(old.id, superseded_by=new_id, actor="user", reason="исправлено человеком")
+        head = self.facts.head(old.id)
+        if head is not None and head.id != old.id and self.facts.visible(head, person_id) \
+                and (head.current or head.status == "pending_review"):
+            old = head
+        if is_secret(new_statement):
+            raise ValueError("секретные данные в память не записываю")
+        now = self.ctx.clock.now()
+        vec = self.ctx.embed1(new_statement.strip())  # вектор — до транзакции
+        with self.ctx.db.tx():
+            new_id = self.facts.add(
+                subject_id=old.subject_id, predicate=old.predicate, statement=new_statement, owner=old.owner_person,
+                object_id=old.object_id, confidence=0.95, importance=old.importance, source_kind="user_stated",
+                source_event_ids=old.source_event_ids, source_episode_id=old.source_episode_id,
+                visibility=old.visibility, actor="user", reason=f"исправление {unit_ref}", observed_at=now, vec=vec)
+            if old.status == "pending_review":
+                self.facts.set_status(old.id, "rejected", actor="user", reason=f"исправлено на F{new_id}")
+            self.facts.invalidate(old.id, superseded_by=new_id, valid_to=now, actor="user", reason="исправлено человеком")
         return new_id
 
+    def pending_facts(self, person_id: str, limit: int = 10) -> list[str]:
+        """Факты «на проверке» (внешний источник, защищённое, не подтвердилось при сверке) — спросить человека."""
+        rows = self.ctx.db.query(
+            "SELECT id, statement, source_kind, replaces_id FROM facts WHERE status='pending_review' "
+            "AND invalidated_at IS NULL AND owner_person=? ORDER BY importance DESC, id DESC LIMIT ?", (person_id, limit))
+        out = []
+        for r in rows:
+            repl = ""
+            if r["replaces_id"]:
+                old = self.facts.get(r["replaces_id"])
+                if old is not None and old.current:
+                    repl = f" — заменит [F{old.id}] «{old.statement}»"
+            out.append(f"[{ref('fact', r['id'])}] {r['statement']} (источник: {r['source_kind']}){repl}")
+        return out
+
+    def review_fact(self, person_id: str, unit_ref: str, approve: bool) -> bool:
+        """Человек решил судьбу факта «на проверке»: approve=True — принять (заменит то, что должен),
+        False — отклонить. Только свои факты. → удалось ли."""
+        u = parse_ref(unit_ref)
+        if not u or u[0] != "fact":
+            return False
+        f = self.facts.get(u[1])
+        if f is None or f.owner_person != person_id or f.status != "pending_review" or f.invalidated_at is not None:
+            return False
+        if approve:
+            self.gate.approve(f, actor="user")
+        else:
+            self.facts.set_status(f.id, "rejected", actor="user", reason="отклонено человеком")
+        return True
+
     def forget(self, person_id: str, unit_ref: str) -> bool:
-        """«Забудь…» — настоящее удаление по просьбе (GDPR). Только своё."""
+        """«Забудь…» — настоящее удаление по просьбе (GDPR). Только своё.
+        Удаляется и то, что из этого выведено: факты эпизода, содержимое аудита и истории ядра;
+        сводки периода стираются и пересобираются во «сне»."""
         u = parse_ref(unit_ref)
         if not u:
             return False
@@ -236,21 +323,62 @@ class CognitiveMemory:
         if row is None or row["owner"] != person_id:
             return False
         with self.ctx.db.tx():
-            if t == "episode":
-                ev_ids = [r["id"] for r in self.ctx.db.query("SELECT id FROM events WHERE episode_id=?", (i,))]
-                for eid in ev_ids:
-                    self.ctx.fts_remove("event", eid)
-                    self.ctx.index.remove("event", eid)
-                self.ctx.db.execute("DELETE FROM events WHERE episode_id=?", (i,))
-            self.ctx.db.execute(f"DELETE FROM {table[0]} WHERE id=?", (i,))
-            self.ctx.db.execute("DELETE FROM links WHERE (src_type=? AND src_id=?) OR (dst_type=? AND dst_id=?)",
-                                (t, i, t, i))
-            self.ctx.db.execute("DELETE FROM access_traces WHERE unit_type=? AND unit_id=?", (t, i))
-            self.ctx.fts_remove(t, i)
+            if t == "fact":
+                self.facts.purge(i)
+            else:
+                ev_ids: list[int] = []
+                if t == "episode":
+                    ep = self.episodes.get(i)
+                    ev_ids = [r["id"] for r in self.ctx.db.query("SELECT id FROM events WHERE episode_id=?", (i,))]
+                    for r in self.ctx.db.query("SELECT id FROM facts WHERE source_episode_id=? AND owner_person=?",
+                                               (i, person_id)):
+                        self.facts.purge(r["id"])
+                    self.ctx.db.execute("UPDATE episodes SET parent_id=NULL WHERE parent_id=?", (i,))
+                    if ep is not None and ep.level == "episode":
+                        self.sleeper.mark_stale(person_id, ep.start_ts, blank=True)
+                elif t == "event":
+                    ev_ids = [i]
+                    ev = self.ctx.db.one("SELECT episode_id, ts FROM events WHERE id=?", (i,))
+                    ep = self.episodes.get(ev["episode_id"]) if ev else None
+                    if ep is not None and ep.gist:  # суть эпизода могла пересказывать удалённое
+                        self.ctx.db.execute("UPDATE episodes SET gist='' WHERE id=?", (ep.id,))
+                        self.ctx.fts_add("episode", ep.id, ep.title)
+                        scrub_audit(self.ctx, "episode", ep.id)
+                        self.sleeper.mark_stale(person_id, ep.start_ts, blank=True)
+                if ev_ids:
+                    self._purge_facts_from_events(person_id, set(ev_ids))
+                    for eid in ev_ids:
+                        self.ctx.fts_remove("event", eid)
+                        self.ctx.index.remove("event", eid)
+                        self.ctx.db.execute("DELETE FROM links WHERE src_type='event' AND src_id=?", (eid,))
+                    if t == "episode":
+                        self.ctx.db.execute("DELETE FROM events WHERE episode_id=?", (i,))
+                self.ctx.db.execute(f"DELETE FROM {table[0]} WHERE id=?", (i,))
+                self.ctx.db.execute("DELETE FROM links WHERE (src_type=? AND src_id=?) OR (dst_type=? AND dst_id=?)",
+                                    (t, i, t, i))
+                self.ctx.db.execute("DELETE FROM access_traces WHERE unit_type=? AND unit_id=?", (t, i))
+                self.ctx.fts_remove(t, i)
+                scrub_audit(self.ctx, t, i)
             self.ctx.audit.log("user", "forget", t, i, reason="удалено по просьбе (содержимое не сохраняется)")
-        if t in ("fact", "episode", "event", "procedure"):
+        if t in ("episode", "event", "procedure"):
             self.ctx.index.remove(t, i)
+        self.core.rebuild_profile(person_id, reason="забыто по просьбе")
         return True
+
+    def _purge_facts_from_events(self, person_id: str, ev_ids: set[int]) -> None:
+        """Факты, целиком основанные на удаляемых репликах, удаляются; у остальных — убираются ссылки."""
+        import json
+
+        for r in self.ctx.db.query("SELECT id, source_event_ids FROM facts WHERE owner_person=? "
+                                   "AND source_event_ids != '[]'", (person_id,)):
+            ids = set(json.loads(r["source_event_ids"]))
+            if not ids & ev_ids:
+                continue
+            if ids <= ev_ids:
+                self.facts.purge(r["id"])
+            else:
+                self.ctx.db.execute("UPDATE facts SET source_event_ids=? WHERE id=?",
+                                    (json.dumps(sorted(ids - ev_ids)), r["id"]))
 
     def recall_deep(self, person_id: str, query: str, *, period: str | None = None,
                     include_outdated: bool = True) -> str:

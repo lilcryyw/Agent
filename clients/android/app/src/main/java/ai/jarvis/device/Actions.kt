@@ -16,9 +16,13 @@ data class Result(val ok: Boolean, val output: String, val image: String? = null
  *   ui_tree    — дерево элементов экрана (дёшево, без картинки).
  */
 object Actions {
-    fun run(ctx: Context, action: String, args: JSONObject): Result = try {
+    /** Выполняющиеся команды: id вызова → процесс (чтобы «Джарвис, стоп» мог их остановить). */
+    private val procs = java.util.concurrent.ConcurrentHashMap<String, Process>()
+    private val cancelled = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
+
+    fun run(ctx: Context, action: String, args: JSONObject, id: String = "", timeoutS: Long = 120): Result = try {
         when (action) {
-            "run" -> shell(args.optString("code"))
+            "run" -> shell(args.optString("code"), args.optJSONObject("env"), id, timeoutS)
             "ui_tree" -> uiTree()
             "screenshot" -> screenshot()
             "input" -> input(args)
@@ -26,12 +30,30 @@ object Actions {
         }
     } catch (e: Exception) { Result(false, "${e.javaClass.simpleName}: ${e.message}") }
 
-    private fun shell(code: String): Result {
-        val proc = ProcessBuilder("sh", "-c", code).redirectErrorStream(true).start()
-        val out = proc.inputStream.bufferedReader().readText()
-        val ok = proc.waitFor(120, TimeUnit.SECONDS)
-        val exit = if (ok) proc.exitValue() else -9.also { proc.destroy() }
-        return Result(exit == 0, "код выхода $exit\n${out.takeLast(50000)}")
+    fun cancel(id: String) {
+        procs[id]?.let { cancelled.add(id); it.destroyForcibly() }
+    }
+
+    private fun shell(code: String, env: JSONObject?, id: String, timeoutS: Long): Result {
+        val pb = ProcessBuilder("sh", "-c", code).redirectErrorStream(true)
+        env?.keys()?.forEach { k -> pb.environment()[k] = env.optString(k) }
+        val proc = pb.start()
+        if (id.isNotEmpty()) procs[id] = proc
+        // Вывод читаем в отдельном потоке: иначе зависшая команда держала бы нас вечно и тайм-аут не работал.
+        val buf = StringBuilder()
+        val reader = Thread {
+            try { proc.inputStream.bufferedReader().forEachLine { synchronized(buf) { buf.append(it).append('\n') } } }
+            catch (_: Exception) {}
+        }.apply { isDaemon = true; start() }
+        val finished = proc.waitFor(timeoutS, TimeUnit.SECONDS)
+        if (!finished) proc.destroyForcibly()
+        reader.join(2000)
+        procs.remove(id)
+        val out = synchronized(buf) { buf.toString() }.takeLast(50000)
+        if (cancelled.remove(id)) return Result(false, "остановлено по просьбе человека\n$out")
+        if (!finished) return Result(false, "превышено время $timeoutS с (процесс остановлен)\n$out")
+        val exit = proc.exitValue()
+        return Result(exit == 0, "код выхода $exit\n$out")
     }
 
     private fun acc(): JarvisAccessibility? = JarvisAccessibility.instance
@@ -52,20 +74,24 @@ object Actions {
 
     private fun input(args: JSONObject): Result {
         val a = acc() ?: return Result(false, "Служба спец. возможностей не включена.")
-        val x = args.optInt("x", -1); val y = args.optInt("y", -1)
+        val x = args.optDouble("x", -1.0).toInt(); val y = args.optDouble("y", -1.0).toInt()
+        val x2 = args.optDouble("x2", -1.0).toInt(); val y2 = args.optDouble("y2", -1.0).toInt()
+        val ms = args.optDouble("ms", 300.0).toLong().coerceIn(50L, 5000L)
         val ok = when (args.optString("action")) {
             "click" -> a.tap(x, y)
             "double_click" -> a.tap(x, y).also { a.tap(x, y) }
-            "right_click" -> a.tap(x, y, longPress = true)
+            "right_click", "long_press" -> a.tap(x, y, longPress = true)
+            "drag", "swipe" -> a.swipe(x, y, x2, y2, ms)
             "type" -> a.typeText(args.optString("text"))
-            "key" -> a.global(args.optString("keys"))
+            "key" -> a.global(args.optString("keys").trim().lowercase())
             "scroll" -> {
-                val amt = args.optInt("amount", -5)
-                a.swipe(x.coerceAtLeast(300), 1000, x.coerceAtLeast(300), 1000 + amt * 60)
+                val amt = args.optDouble("amount", -5.0).toInt()
+                val cx = if (x >= 0) x else 540; val cy = if (y >= 0) y else 1200
+                a.swipe(cx, cy, cx, cy + amt * 60)
             }
             "move" -> true
             else -> return Result(false, "неизвестный ввод")
         }
-        return Result(ok, if (ok) "сделано" else "не удалось (проверь, что служба включена)")
+        return Result(ok, if (ok) "сделано" else "не удалось (проверь, что служба включена и элемент в фокусе)")
     }
 }
