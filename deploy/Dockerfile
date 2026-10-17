@@ -8,7 +8,8 @@ COPY pyproject.toml README.md ./
 COPY cogmem ./cogmem
 COPY jarvis ./jarvis
 COPY evals ./evals
-RUN pip install --no-cache-dir -e '.[embeddings,telegram]'
+COPY clients ./clients
+RUN pip install --no-cache-dir -e '.[embeddings,telegram,devices]'
 
 VOLUME ["/app/data"]
 CMD ["python", "-m", "jarvis.channels.telegram"]

@@ -18,7 +18,7 @@ from typing import Any, Iterator
 
 import numpy as np
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def to_blob(vec: np.ndarray | None) -> bytes | None:

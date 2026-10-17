@@ -8,6 +8,7 @@ services:
     environment:
       JARVIS_DB: /app/data/jarvis.db
       JARVIS_WORKSHOP_URL: http://workshop:8700
+      JARVIS_DEVICES_URL: wss://${JARVIS_DOMAIN}/devices
     volumes:
       - ../data:/app/data            # память, навыки, сейф, кэш модели смыслов (бэкапить эту папку!)
     depends_on: [workshop]
@@ -28,4 +29,16 @@ services:
       - ../data/skills:/data/skills:ro
     mem_limit: 2g
     pids_limit: 512
+    restart: unless-stopped
+
+  # Входная дверь с HTTPS: устройства подключаются через неё (порты 80/443).
+  caddy:
+    image: caddy:2
+    ports: ["80:80", "443:443"]
+    environment:
+      JARVIS_DOMAIN: ${JARVIS_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ../data/caddy:/data
+    depends_on: [jarvis]
     restart: unless-stopped

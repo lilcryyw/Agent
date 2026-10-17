@@ -46,6 +46,9 @@ class Settings:
     telegram_users: dict[int, str] = field(default_factory=dict)  # telegram id → person id
     # Члены семьи: id → (имя, роль, часовой пояс). Владелец добавляется отдельно.
     people: dict[str, tuple[str, str, str]] = field(default_factory=dict)
+    # Шлюз устройств: порт WebSocket и внешний адрес (за Caddy с HTTPS), например wss://jarvis.example.com/devices
+    devices_port: int = 8765
+    devices_url: str = ""
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -67,6 +70,8 @@ class Settings:
         for pair in filter(None, (p.strip() for p in users.split(","))):
             tg, pid = pair.split(":", 1)
             s.telegram_users[int(tg)] = pid.strip()
+        s.devices_port = int(e.get("JARVIS_DEVICES_PORT", s.devices_port))
+        s.devices_url = e.get("JARVIS_DEVICES_URL", s.devices_url)
         people = e.get("JARVIS_PEOPLE", "")  # «mama:Ольга Петровна:family:Europe/Samara;papa:...»
         for item in filter(None, (p.strip() for p in people.split(";"))):
             parts = [x.strip() for x in item.split(":")]

@@ -31,6 +31,7 @@ MONTHS_GEN = ["января", "февраля", "марта", "апреля", "�
 USED_RE = re.compile(r"⟦\s*исп\s*:([^⟧]*)⟧")
 REF_RE = re.compile(r"\[([FEMNPIGK]\d+)\]")
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
+CONTEXT_BETA = "context-management-2025-06-27"
 MAX_STEPS = 30  # свобода искать способ: попытки, код, навыки — но не бесконечно
 
 
@@ -77,6 +78,7 @@ class Brain:
         self.sessions: dict[str, Session] = {}
         self._locks: dict[str, threading.Lock] = {}
         self._fallbacks_ok = settings.use_fallbacks
+        self._ctx_edit_ok = True
 
     # ------------------------------------------------------------------ API
     def _call(self, messages: list[dict]) -> Any:
@@ -88,21 +90,34 @@ class Brain:
             messages=messages,
             output_config={"effort": self.s.brain_effort},
         )
-        extra: dict[str, Any] = {"cache_control": {"type": "ephemeral"}}  # автокэш хвоста разговора
-        if self._fallbacks_ok:
-            extra["fallbacks"] = "default"
+        # Необязательные возможности API: если аккаунт/платформа их не поддерживает — отключаем по одной.
+        while True:
+            extra: dict[str, Any] = {"cache_control": {"type": "ephemeral"}}  # автокэш хвоста разговора
+            betas = []
+            if self._fallbacks_ok:
+                extra["fallbacks"] = "default"  # отказ фильтров → повтор на подходящей модели
+                betas.append(FALLBACK_BETA)
+            if self._ctx_edit_ok:
+                # Старые результаты инструментов (снимки экрана, длинные выводы) убираются сервером.
+                extra["context_management"] = {"edits": [{"type": "clear_tool_uses_20250919"}]}
+                betas.append(CONTEXT_BETA)
             try:
-                return self.client.beta.messages.create(**kwargs, betas=[FALLBACK_BETA], extra_body=extra)
-            except Exception as exc:  # аккаунт/платформа без резервных моделей — работаем без них
+                if betas:
+                    return self.client.beta.messages.create(**kwargs, betas=betas, extra_body=extra)
+                return self.client.messages.create(**kwargs, extra_body=extra)
+            except Exception as exc:
                 import anthropic
 
-                if isinstance(exc, anthropic.BadRequestError) and "fallback" in str(exc).lower():
-                    log.warning("резервные модели недоступны: %s — отключаю", exc)
+                if not isinstance(exc, anthropic.BadRequestError):
+                    raise
+                text = str(exc).lower()
+                if self._fallbacks_ok and "fallback" in text:
                     self._fallbacks_ok = False
-                    extra.pop("fallbacks")
+                elif self._ctx_edit_ok and ("context" in text or "clear_tool" in text):
+                    self._ctx_edit_ok = False
                 else:
                     raise
-        return self.client.messages.create(**kwargs, extra_body=extra)
+                log.warning("возможность API недоступна (%s) — отключаю и повторяю", exc)
 
     # ------------------------------------------------------------------ ход
     def _lock(self, person_id: str) -> threading.Lock:
@@ -198,7 +213,7 @@ class Brain:
                     tool_calls.append(b.name)
                     out, is_err = self.tools.run(person_id, b.name, dict(b.input), origin=origin,
                                                  source_event_id=obs.event_id if origin == "user" else None)
-                    refs = REF_RE.findall(out)
+                    refs = REF_RE.findall(out) if isinstance(out, str) else []
                     sess.shown.update(refs)
                     shown_now += refs
                     results.append({"type": "tool_result", "tool_use_id": b.id, "content": out, "is_error": is_err})

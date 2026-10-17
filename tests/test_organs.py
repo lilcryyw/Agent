@@ -24,11 +24,13 @@ def box(tmp_path):
     hub = DeviceHub()
     calls = []
 
-    def exe(lang, code, timeout):
-        calls.append(code)
-        return DeviceResult(True, f"выполнено: {code[:40]}")
+    def exe(action, args, timeout):
+        calls.append(args.get("code", action))
+        if action == "screenshot":
+            return DeviceResult(True, "снимок 100x50", "iVBORw0KGgo=")
+        return DeviceResult(True, f"выполнено: {str(args)[:60]}")
 
-    hub.register(Device("pc", "owner", "windows", "ПК Владимира", ["powershell", "python"], exe))
+    hub.register(Device("pc", "owner", "windows", "ПК Владимира", ["powershell", "python"], exe, {"screen", "input"}))
     hub.register(Device("mama-phone", "mama", "android", "Телефон мамы", ["shell"], exe))
     tb = ToolBox(mem, workshop=ws, skills=SkillBank(mem, ws, tmp_path / "skills"), keys=KeyRing(mem),
                  devices=hub, vault=Vault(tmp_path / "vault.bin"))

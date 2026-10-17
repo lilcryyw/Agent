@@ -42,13 +42,30 @@ EFFECTS = {"type": "array", "items": {"type": "string", "enum": ["money", "messa
                           "людям от имени человека; delete — удаляет его личные данные. Пусто — ничего из этого."}
 
 TOOLS: list[dict] = [
+    {"name": "device_input",
+     "description": "Мышь и клавиатура на устройстве (после device_screen; координаты — в пикселях снимка). "
+                    "action: click | double_click | right_click | move | type | key | scroll. keys — как "
+                    "'ctrl+c', 'enter'. Если ввод отправляет что-то людям от имени человека — effects=['message'].",
+     "input_schema": _schema({"device": S, "action": {"type": "string", "enum": ["click", "double_click",
+                              "right_click", "move", "type", "key", "scroll"]}, "x": NN, "y": NN, "text": SN,
+                              "keys": SN, "amount": NN, "effects": EFFECTS, "target": SN})},
     {"name": "device_list", "description": "Какие устройства сейчас подключены и что умеют.",
      "input_schema": _schema({})},
+    {"name": "device_pair",
+     "description": "Подключить новое устройство (ПК, ноутбук, Android): выдаёт одноразовый код и инструкцию, "
+                    "что выполнить на устройстве. kind: windows | mac | linux | android. for_person — для кого "
+                    "(null — для собеседника). Если устройство рядом с уже подключённым ПК, можешь сделать "
+                    "многое сам через device_run (например, Android по ADB: adb pair/connect/install).",
+     "input_schema": _schema({"kind": {"type": "string", "enum": ["windows", "mac", "linux", "android"]},
+                              "for_person": SN})},
     {"name": "device_run",
      "description": "Выполнить код/команду на подключённом устройстве (ПК, телефон). Обычные действия — свободно: "
                     "открыть, установить, настроить, прочитать. target и amount_eur — для действий под замком.",
      "input_schema": _schema({"device": S, "language": {"type": "string", "enum": ["python", "powershell", "shell"]},
                               "code": S, "purpose": S, "effects": EFFECTS, "target": SN, "amount_eur": NN})},
+    {"name": "device_screen",
+     "description": "Посмотреть экран устройства (снимок). Дальше — device_input. Для того, у чего нет API.",
+     "input_schema": _schema({"device": S})},
     {"name": "goal",
      "description": "Цели — то, что ты доводишь до конца за несколько шагов/дней. op: add | update | done | drop. "
                     "next_check_local — когда вернуться к цели ('YYYY-MM-DDTHH:MM' по времени человека).",
@@ -107,8 +124,10 @@ DELETE_RE = re.compile(r"(rm\s+-[a-z]*r|Remove-Item[^\n]*-Recurse|shutil\.rmtree
 
 class ToolBox:
     def __init__(self, memory: CognitiveMemory, *, workshop: Workshop, skills: SkillBank, keys: KeyRing,
-                 devices: DeviceHub, vault: Vault):
+                 devices: DeviceHub, vault: Vault, pairing: Any = None, devices_url: str = ""):
         self.m = memory
+        self.pairing = pairing          # (owner, kind) → код; None — шлюз устройств не запущен
+        self.devices_url = devices_url  # wss://сервер/devices
         self.ws = workshop
         self.skills = skills
         self.keys = keys
@@ -238,7 +257,83 @@ class ToolBox:
             return self.devices.describe(person), False
         if name == "device_run":
             return self._exec(person, a, device=a["device"])
+        if name == "device_screen":
+            return self._screen(person, a["device"])
+        if name == "device_input":
+            return self._input(person, a)
+        if name == "device_pair":
+            return self._pair(person, a["kind"], a.get("for_person"))
         return f"Нет такого органа: {name}", True
+
+    def _device_for(self, person: str, device_id: str, effects: list[str], target: str | None):
+        dev = self.devices.get(device_id)
+        if dev is None:
+            return None, [], f"Устройство «{device_id}» не на связи.\n" + self.devices.describe(person)
+        needed = set(effects or []) & set(SCOPES)
+        if dev.owner != person:
+            needed.add("relative_device")
+        keys, err = self._unlock(person, needed, target or (dev.owner if dev.owner != person else None), None)
+        return dev, keys, err
+
+    def _screen(self, person: str, device_id: str):
+        dev, keys, err = self._device_for(person, device_id, [], None)
+        if err:
+            return err, True
+        if "screen" not in dev.capabilities:
+            return f"У «{dev.name}» нет доступа к экрану (на устройстве нужно: pip install mss pillow).", True
+        res = dev.call("screenshot", {}, 60.0)
+        for k in keys:
+            self.keys.use(k)
+        if not res.ok or not res.image_b64:
+            return res.output or "Не удалось снять экран.", True
+        return [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": res.image_b64}},
+                {"type": "text", "text": res.output}], False
+
+    def _input(self, person: str, a: dict):
+        dev, keys, err = self._device_for(person, a["device"], a.get("effects") or [], a.get("target"))
+        if err:
+            return err, True
+        if "input" not in dev.capabilities:
+            return f"У «{dev.name}» нет управления мышью/клавиатурой (на устройстве нужно: pip install pyautogui).", True
+        args = {k: a.get(k) for k in ("action", "x", "y", "text", "keys", "amount")}
+        res = dev.call("input", args, 30.0)
+        for k in keys:
+            self.keys.use(k)
+        self.m.ctx.audit.log("brain", "device_input", "action", None,
+                             after={"device": dev.id, "action": a["action"], "ok": res.ok})
+        return res.output, not res.ok
+
+    def _pair(self, person: str, kind: str, for_person: str | None):
+        owner = for_person or person
+        if owner != person:
+            p = self.m.person(person)
+            if not p or p["role"] != "owner" or self.m.person(owner) is None:
+                return "Подключать устройства для других может только владелец, и только для членов семьи.", True
+        if self.pairing is None or not self.devices_url:
+            return "Шлюз устройств не настроен (JARVIS_DEVICES_URL). Без него устройство не подключить.", True
+        code = self.pairing(owner, kind)
+        url = self.devices_url.rstrip("/")
+        http = url.replace("wss://", "https://").replace("ws://", "http://") + "/client.py"
+        run = f'--server {url} --pair {code} --install'
+        steps = {
+            "windows": ("В PowerShell:\n"
+                        "winget install -e --id Python.Python.3.12   (если Python ещё нет)\n"
+                        "py -m pip install websockets mss pillow pyautogui\n"
+                        f"Invoke-WebRequest {http} -OutFile $HOME\\jarvis_device.py\n"
+                        f"py $HOME\\jarvis_device.py {run}"),
+            "android": ("Поставить из F-Droid: Termux, Termux:API, Termux:Boot. В Termux:\n"
+                        "pkg install -y python termux-api && pip install websockets\n"
+                        f"curl -o ~/jarvis_device.py {http}\n"
+                        f"python ~/jarvis_device.py {run}\n"
+                        "Если телефон рядом с подключённым ПК — могу сделать большую часть сам через ADB "
+                        "(нужно включить «Отладку по Wi-Fi» и назвать код сопряжения)."),
+            "mac": ("В Терминале:\npython3 -m pip install websockets mss pillow pyautogui\n"
+                    f"curl -o ~/jarvis_device.py {http}\npython3 ~/jarvis_device.py {run}"),
+            "linux": ("В терминале:\npython3 -m pip install websockets mss pillow pyautogui\n"
+                      f"curl -o ~/jarvis_device.py {http}\npython3 ~/jarvis_device.py {run}"),
+        }[kind]
+        return (f"Код подключения: {code} (действует 15 минут, один раз). Для: {owner}.\n{steps}\n"
+                "Можно продиктовать это человеку по шагам или, если есть доступ к устройству, выполнить самому."), False
 
     def _exec(self, person: str, a: dict, *, device: str | None) -> tuple[str, bool]:
         code = a["code"]
@@ -261,7 +356,7 @@ class ToolBox:
             res = self.ws.run(filled)
             ok, out = res.ok, res.summary()
         else:
-            dres = dev.executor(a["language"], filled, 120.0)
+            dres = dev.run(a["language"], filled, 120.0)
             ok, out = dres.ok, dres.output
         out = self.vault.scrub(out, used_secrets)
         for k in keys:

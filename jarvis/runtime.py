@@ -17,6 +17,7 @@ from jarvis.brain.agent import Brain
 from jarvis.brain.tools import ToolBox
 from jarvis.config import Settings
 from jarvis.devices import DeviceHub
+from jarvis.devices.gateway import Gateway
 from jarvis.keys import KeyRing
 from jarvis.mind.initiative import Initiative
 from jarvis.secrets import Vault
@@ -51,9 +52,11 @@ class Jarvis:
         self.skills = SkillBank(m, self.workshop, data / "skills")
         self.keys = KeyRing(m)
         self.devices = DeviceHub()
+        self.gateway = Gateway(m, self.devices, port=self.s.devices_port) if self.s.devices_port else None
         self.vault = Vault(data / "vault.bin")
         self.tools = ToolBox(m, workshop=self.workshop, skills=self.skills, keys=self.keys, devices=self.devices,
-                             vault=self.vault)
+                             vault=self.vault, pairing=self.gateway.create_pairing if self.gateway else None,
+                             devices_url=self.s.devices_url)
         self.brain = Brain(m, self.s, client, self.tools)
         self._notifiers: list[Notifier] = []
         self.initiative = Initiative(m, m.llm, self.brain.handle_stimulus, self._notify)
@@ -112,6 +115,10 @@ class Jarvis:
                     log.exception("ошибка инициативы для %s", r["id"])
 
     def start_background(self, interval_s: float = 60.0) -> threading.Thread:
+        if self.gateway is not None and self.gateway.loop is None:
+            self.gateway.start()
+            log.info("шлюз устройств слушает порт %s", self.gateway.port)
+
         def loop():
             while not self._stop.wait(interval_s):
                 self.pulse()

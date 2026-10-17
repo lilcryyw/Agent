@@ -283,3 +283,24 @@ CREATE TABLE IF NOT EXISTS keys (
     revoked_at        REAL
 );
 CREATE INDEX IF NOT EXISTS ix_keys_person ON keys(person_id, scope);
+
+-- Подключённые устройства (ПК, телефоны). Токен хранится только в виде хеша.
+CREATE TABLE IF NOT EXISTS devices (
+    id          TEXT PRIMARY KEY,
+    owner       TEXT NOT NULL,
+    kind        TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    token_hash  TEXT NOT NULL,
+    created_at  REAL NOT NULL,
+    last_seen   REAL,
+    revoked_at  REAL
+);
+
+-- Одноразовые коды подключения нового устройства (живут 15 минут).
+CREATE TABLE IF NOT EXISTS pairings (
+    code_hash   TEXT PRIMARY KEY,
+    owner       TEXT NOT NULL,
+    kind        TEXT NOT NULL,
+    expires_at  REAL NOT NULL,
+    used_at     REAL
+);

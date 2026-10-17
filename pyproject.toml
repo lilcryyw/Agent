@@ -16,6 +16,7 @@ dependencies = [
 # Локальная модель эмбеддингов (не языковая модель — только «отпечаток смысла» текста).
 embeddings = ["fastembed>=0.4"]
 telegram = ["aiogram>=3.4"]
+devices = ["websockets>=13"]
 dev = ["pytest>=8"]
 
 [project.scripts]

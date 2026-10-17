@@ -1,8 +1,9 @@
-"""Хаб устройств: что подключено и как на нём выполнить код.
+"""Хаб устройств: что подключено и как с ним работать.
 
-Сейчас — интерфейс и реестр; реальные клиенты (Windows, Android, iPhone) подключаются на этапе
-«Устройства» через WebSocket и регистрируются здесь же. У каждого устройства есть владелец:
-действия на устройствах других членов семьи — под замком (ключ relative_device).
+Устройство умеет действия (call): run — выполнить код/команду; screenshot — снимок экрана;
+input — мышь и клавиатура. Реальные устройства подключаются через шлюз (jarvis.devices.gateway),
+в тестах — напрямую функцией. У каждого устройства есть владелец: устройства других членов семьи —
+под замком (ключ relative_device).
 """
 
 from __future__ import annotations
@@ -16,20 +17,24 @@ from typing import Callable
 class DeviceResult:
     ok: bool
     output: str
+    image_b64: str | None = None  # PNG снимка экрана
 
 
-Executor = Callable[[str, str, float], DeviceResult]  # (язык, код, таймаут) → результат
+Call = Callable[[str, dict, float], DeviceResult]  # (действие, аргументы, таймаут) → результат
 
 
 @dataclass
 class Device:
     id: str
     owner: str               # id человека
-    kind: str                # windows | android | iphone | linux | mac
+    kind: str                # windows | android | linux | mac | iphone
     name: str
     languages: list[str]     # что умеет выполнять: python, powershell, shell
-    executor: Executor
-    capabilities: set[str] = field(default_factory=set)  # screen, sms, location, ...
+    call: Call
+    capabilities: set[str] = field(default_factory=set)  # screen, input, termux_api, ...
+
+    def run(self, language: str, code: str, timeout: float = 120.0) -> DeviceResult:
+        return self.call("run", {"language": language, "code": code}, timeout)
 
 
 class DeviceHub:
@@ -53,8 +58,8 @@ class DeviceHub:
 
     def describe(self, viewer: str) -> str:
         if not self._devices:
-            return ("Сейчас ни одно устройство не подключено. Код можно выполнять в мастерской (run_code). "
-                    "Клиенты для ПК и телефонов подключаются на этапе «Устройства».")
+            return ("Сейчас ни одно устройство не подключено. Чтобы подключить — device_pair: он выдаст код и "
+                    "инструкцию. Код без устройства можно выполнять в мастерской (run_code).")
         lines = []
         for d in self.all():
             whose = "твоё" if d.owner == viewer else f"принадлежит {d.owner} (под замком relative_device)"

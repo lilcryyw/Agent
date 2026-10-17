@@ -1,0 +1,8 @@
+# HTTPS сертификат Caddy получает сам (Let's Encrypt). Домен — в .env: JARVIS_DOMAIN.
+{$JARVIS_DOMAIN} {
+    # Устройства (ПК, телефоны) подключаются сюда по WebSocket; здесь же скачивается клиент.
+    handle /devices* {
+        reverse_proxy jarvis:8765
+    }
+    respond "Джарвис на связи" 200
+}
