@@ -14,3 +14,4 @@ clients/android/local.properties
 clients/android/build/
 deploy/cloudflare/.secrets
 deploy/hf/.secrets
+deploy/render/.secrets
