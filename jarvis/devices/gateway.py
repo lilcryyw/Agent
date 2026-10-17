@@ -2,11 +2,13 @@
 
 Устройство само звонит серверу (порты дома открывать не нужно). Протокол — JSON-сообщения:
   устройство → сервер: {"type":"pair","code":"ABCD-EFGH", ...описание}   — первое подключение по коду
+                       {"type":"utterance","audio_b64":..}  — человек сказал «Джарвис, …» у этого устройства
                        {"type":"hello","device_id":..,"token":.., ...}  — обычное подключение
                        {"type":"result","id":..,"ok":..,"output":..,"image_b64":..}
                        {"type":"event","text":..,"trust":"observed"|"external"}  — что-то произошло на устройстве
   сервер → устройство: {"type":"welcome","device_id":..,"token":..}
                        {"type":"call","id":..,"action":"run"|"screenshot"|"input","args":{..}}
+                       {"type":"say","text":..,"audio_b64":..}  — сказать вслух на устройстве (ответ или инициатива)
 Описание: name, kind, languages, capabilities. GET /client.py — скачать клиента (для подключения нового устройства).
 Токены хранятся только хешами; код подключения — одноразовый, живёт 15 минут.
 """
@@ -44,8 +46,12 @@ def _slug(s: str) -> str:
 
 
 class Gateway:
-    def __init__(self, memory: CognitiveMemory, hub: DeviceHub, *, host: str = "0.0.0.0", port: int = 8765):
+    def __init__(self, memory: CognitiveMemory, hub: DeviceHub, *, host: str = "0.0.0.0", port: int = 8765,
+                 on_utterance=None, tts=None):
         self.m = memory
+        # on_utterance(owner, device_id, audio) → (услышанный текст, ответ); tts(text) → wav
+        self.on_utterance = on_utterance
+        self.tts = tts
         self.hub = hub
         self.host, self.port = host, port
         self.loop: asyncio.AbstractEventLoop | None = None
@@ -158,6 +164,8 @@ class Gateway:
                     if fut is not None and not fut.done():
                         fut.set_result(DeviceResult(bool(msg.get("ok")), str(msg.get("output", ""))[:50_000],
                                                     msg.get("image_b64")))
+                elif msg.get("type") == "utterance" and self.on_utterance is not None:
+                    asyncio.create_task(self._utterance(ws, info["owner"], device_id, msg))
                 elif msg.get("type") == "event":
                     trust = "external" if msg.get("trust") == "external" else "observed"
                     self._observe(info["owner"], device_id, f"[{info['name']}] {str(msg.get('text', ''))[:2000]}", trust)
@@ -168,6 +176,39 @@ class Gateway:
                 self._conns.pop(device_id, None)
                 self.hub.unregister(device_id)
                 log.info("устройство %s отключилось", device_id)
+
+    async def _utterance(self, ws, owner: str, device_id: str, msg: dict) -> None:
+        import base64
+
+        try:
+            audio = base64.b64decode(msg.get("audio_b64") or "")
+            heard, reply = await asyncio.to_thread(self.on_utterance, owner, device_id, audio)
+            if reply:
+                await self._say_ws(ws, reply)
+        except Exception:  # noqa: BLE001
+            log.exception("ошибка голосового хода с устройства")
+            await self._say_ws(ws, "Что-то пошло не так, повтори, пожалуйста.")
+
+    async def _say_ws(self, ws, text: str) -> None:
+        import base64
+
+        audio = None
+        if self.tts is not None:
+            try:
+                audio = base64.b64encode(await asyncio.to_thread(self.tts, text)).decode()
+            except Exception:  # noqa: BLE001
+                log.exception("синтез речи не удался")
+        await ws.send(json.dumps({"type": "say", "text": text, "audio_b64": audio}))
+
+    def say(self, person: str, text: str) -> bool:
+        """Сказать вслух на устройствах человека, где есть динамик. → было ли где сказать."""
+        targets = [self._conns[d.id] for d in self.hub.all()
+                   if d.owner == person and "speaker" in d.capabilities and d.id in self._conns]
+        if not targets or self.loop is None:
+            return False
+        for ws in targets:
+            asyncio.run_coroutine_threadsafe(self._say_ws(ws, text), self.loop)
+        return True
 
     def _observe(self, owner: str, device_id: str, text: str, trust: str) -> None:
         try:

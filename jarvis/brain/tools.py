@@ -373,21 +373,22 @@ class ToolBox:
         steps = {
             "windows": ("В PowerShell:\n"
                         "winget install -e --id Python.Python.3.12   (если Python ещё нет)\n"
-                        "py -m pip install websockets mss pillow pyautogui\n"
+                        "py -m pip install websockets mss pillow pyautogui vosk sounddevice numpy\n"
                         f"Invoke-WebRequest {http} -OutFile $HOME\\jarvis_device.py\n"
-                        f"py $HOME\\jarvis_device.py {run}"),
+                        f"py $HOME\\jarvis_device.py {run} --voice"),
             "android": ("Поставить из F-Droid: Termux, Termux:API, Termux:Boot. В Termux:\n"
                         "pkg install -y python termux-api && pip install websockets\n"
                         f"curl -o ~/jarvis_device.py {http}\n"
                         f"python ~/jarvis_device.py {run}\n"
                         "Если телефон рядом с подключённым ПК — могу сделать большую часть сам через ADB "
                         "(нужно включить «Отладку по Wi-Fi» и назвать код сопряжения)."),
-            "mac": ("В Терминале:\npython3 -m pip install websockets mss pillow pyautogui\n"
-                    f"curl -o ~/jarvis_device.py {http}\npython3 ~/jarvis_device.py {run}"),
-            "linux": ("В терминале:\npython3 -m pip install websockets mss pillow pyautogui\n"
-                      f"curl -o ~/jarvis_device.py {http}\npython3 ~/jarvis_device.py {run}"),
+            "mac": ("В Терминале:\npython3 -m pip install websockets mss pillow pyautogui vosk sounddevice numpy\n"
+                    f"curl -o ~/jarvis_device.py {http}\npython3 ~/jarvis_device.py {run} --voice"),
+            "linux": ("В терминале:\npython3 -m pip install websockets mss pillow pyautogui vosk sounddevice numpy\n"
+                      f"curl -o ~/jarvis_device.py {http}\npython3 ~/jarvis_device.py {run} --voice"),
         }[kind]
         return (f"Код подключения: {code} (действует 15 минут, один раз). Для: {owner}.\n{steps}\n"
+                "--voice — слушать «Джарвис, …» и отвечать вслух (можно убрать, если микрофон не нужен).\n"
                 "Можно продиктовать это человеку по шагам или, если есть доступ к устройству, выполнить самому."), False
 
     def _exec(self, person: str, a: dict, *, device: str | None) -> tuple[str, bool]:

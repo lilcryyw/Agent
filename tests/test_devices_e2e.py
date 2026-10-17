@@ -97,3 +97,41 @@ def test_client_falls_back_to_relay_address(gw, tmp_path):
         assert wait(lambda: hub.all(), timeout=20), "не переключился на запасной адрес"
     finally:
         proc.kill()
+
+
+def test_voice_utterance_and_proactive_say(tmp_path):
+    """Устройство прислало голос → сервер ответил голосом; инициатива звучит на устройстве с динамиком."""
+    import asyncio
+    import base64
+    import json
+
+    from websockets.asyncio.client import connect
+
+    mem = CognitiveMemory(embedder=HashEmbedder(), clock=SystemClock())
+    mem.add_person("owner", "Владимир", role="owner")
+    hub = DeviceHub()
+    heard = []
+    g = Gateway(mem, hub, host="127.0.0.1", port=0,
+                on_utterance=lambda owner, dev, audio: (heard.append((owner, audio)), ("привет", "И тебе привет!"))[1],
+                tts=lambda text: b"WAV:" + text.encode())
+    g.start()
+    code = g.create_pairing("owner", "windows")
+
+    async def scenario():
+        url = f"ws://127.0.0.1:{g.port}/devices"
+        async with connect(url, proxy=None) as ws:
+            await ws.send(json.dumps({"type": "pair", "code": code, "name": "ПК", "kind": "windows",
+                                      "languages": ["python"], "capabilities": ["speaker", "microphone"]}))
+            welcome = json.loads(await ws.recv())
+            await ws.send(json.dumps({"type": "utterance", "audio_b64": base64.b64encode(b"RIFF...").decode()}))
+            say = json.loads(await asyncio.wait_for(ws.recv(), 10))
+            assert say["type"] == "say" and say["text"] == "И тебе привет!"
+            assert base64.b64decode(say["audio_b64"]) == "WAV:И тебе привет!".encode()
+            assert await asyncio.to_thread(g.say, "owner", "Напоминаю про налоговую")
+            say2 = json.loads(await asyncio.wait_for(ws.recv(), 10))
+            assert say2["text"] == "Напоминаю про налоговую"
+            return welcome
+
+    asyncio.run(scenario())
+    assert heard and heard[0][0] == "owner" and heard[0][1] == b"RIFF..."
+    assert not g.say("mama", "x")  # у мамы нет устройств — сказать негде

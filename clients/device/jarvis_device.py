@@ -8,7 +8,9 @@
     python jarvis_device.py --server wss://ВАШ-СЕРВЕР/devices --pair ABCD-EFGH --name "Ноутбук" --install
 Дальше клиент сам подключается при входе в систему (--install) и переподключается при обрывах.
 
-Что умеет по просьбе Джарвиса: выполнить код (python, powershell/shell), снять экран, нажать/напечатать.
+Что умеет по просьбе Джарвиса: выполнить код (python, powershell/shell), снять экран, нажать/напечатать,
+сказать вслух. Голосовой режим (--voice): скажите «Джарвис, …» — фраза уйдёт серверу, ответ прозвучит здесь.
+Для голоса: `pip install vosk sounddevice numpy` (модель слова «Джарвис» ~45 МБ скачается сама, работает офлайн).
 Токен хранится в ~/.jarvis_device.json (только для вас).
 """
 
@@ -25,6 +27,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
+import wave
 from pathlib import Path
 
 CONFIG = Path.home() / ".jarvis_device.json"
@@ -39,7 +44,7 @@ def detect_kind() -> str:
     return {"Windows": "windows", "Darwin": "mac"}.get(platform.system(), "linux")
 
 
-def detect() -> dict:
+def detect(voice: bool = False) -> dict:
     kind = detect_kind()
     langs = ["python", "powershell" if kind == "windows" else "shell"]
     caps = set()
@@ -57,7 +62,164 @@ def detect() -> dict:
         pass
     if shutil.which("termux-battery-status"):
         caps.add("termux_api")  # termux-location, termux-sms-send, termux-notification, ...
+    try:
+        import sounddevice  # noqa: F401
+        caps.add("speaker")
+    except Exception:  # noqa: BLE001
+        if shutil.which("termux-tts-speak") or kind in ("windows", "mac"):
+            caps.add("speaker")  # системный голос
+    if voice:
+        caps.add("microphone")
     return {"kind": kind, "languages": langs, "capabilities": sorted(caps)}
+
+
+# ---------------------------------------------------------------- голос
+VOSK_MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip"
+MODELS = Path.home() / ".jarvis_models"
+_speaking = threading.Event()  # пока Джарвис говорит — не слушаем (чтобы не услышать сам себя)
+
+
+def _vosk_model_path() -> Path:
+    path = MODELS / "vosk-model-small-ru-0.22"
+    if not path.exists():
+        import urllib.request
+        import zipfile
+
+        MODELS.mkdir(parents=True, exist_ok=True)
+        z = MODELS / "vosk.zip"
+        print("скачиваю модель слова «Джарвис» (~45 МБ)…", file=sys.stderr)
+        urllib.request.urlretrieve(VOSK_MODEL_URL, z)
+        with zipfile.ZipFile(z) as f:
+            f.extractall(MODELS)
+        z.unlink()
+    return path
+
+
+def pcm_to_wav(pcm: bytes, rate: int = 16000) -> bytes:
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(pcm)
+    return buf.getvalue()
+
+
+WAKE_FORMS = ("джарвис", "джервис", "жарвис", "джарвиз")
+
+
+def voice_listener(loop: asyncio.AbstractEventLoop, out: asyncio.Queue, wake: str = "джарвис") -> None:
+    """Поток: офлайн ждём слово «Джарвис», затем пишем фразу до паузы и кладём WAV в очередь.
+
+    Два этапа (проверено на синтезированной речи: 0 ложных срабатываний на похожих словах):
+    1) быстрый распознаватель, знающий только слово «Джарвис», даёт кандидата;
+    2) полная модель перепроверяет последние 2 секунды — действительно ли сказано «Джарвис».
+    """
+    import queue as q
+
+    import numpy as np
+    import sounddevice as sd
+    import vosk
+
+    vosk.SetLogLevel(-1)
+    model = vosk.Model(str(_vosk_model_path()))
+    spot = vosk.KaldiRecognizer(model, 16000, json.dumps([wake, "[unk]"], ensure_ascii=False))
+    chunks: q.Queue = q.Queue()
+    block = 4000  # 0.25 с
+    noise = [400.0]
+    recent = b""
+
+    def rms(d: bytes) -> float:
+        a = np.frombuffer(d, np.int16).astype(np.float32)
+        return float(np.sqrt(np.mean(a * a))) if a.size else 0.0
+
+    def confirmed(pcm: bytes) -> bool:
+        full = vosk.KaldiRecognizer(model, 16000)
+        full.SetWords(True)
+        full.AcceptWaveform(pcm)
+        words = json.loads(full.FinalResult()).get("result", [])
+        forms = WAKE_FORMS if wake == "джарвис" else (wake,)
+        return any(w.get("word") in forms and w.get("conf", 0) > 0.5 for w in words)
+
+    with sd.RawInputStream(samplerate=16000, blocksize=block, dtype="int16", channels=1,
+                           callback=lambda indata, frames, t, status: chunks.put(bytes(indata))):
+        print("слушаю: скажите «Джарвис, …»", file=sys.stderr)
+        while True:
+            data = chunks.get()
+            if _speaking.is_set():
+                spot.Reset()
+                recent = b""
+                continue
+            recent = (recent + data)[-64000:]  # последние 2 с
+            noise.append(rms(data))
+            del noise[:-40]
+            if spot.AcceptWaveform(data):
+                hit = wake in json.loads(spot.Result()).get("text", "")
+            else:
+                hit = wake in json.loads(spot.PartialResult()).get("partial", "")
+            if not hit:
+                continue
+            spot.Reset()
+            if not confirmed(recent):
+                continue
+            play_beep()
+            threshold = max(300.0, sorted(noise)[len(noise) // 2] * 2.5)
+            frames, silent, spoke = [recent], 0, True  # начало фразы уже в буфере
+            while True:
+                d = chunks.get()
+                frames.append(d)
+                if rms(d) > threshold:
+                    silent = 0
+                else:
+                    silent += 1
+                dur = (len(frames) - 1) * 0.25
+                if silent >= 5 or dur > 15:
+                    break
+            recent = b""
+            asyncio.run_coroutine_threadsafe(out.put(pcm_to_wav(b"".join(frames))), loop)
+
+
+def play_beep() -> None:
+    try:
+        import numpy as np
+        import sounddevice as sd
+
+        t = np.linspace(0, 0.12, int(16000 * 0.12), False)
+        sd.play((0.2 * np.sin(2 * np.pi * 880 * t)).astype(np.float32), 16000)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def speak(text: str, audio_b64: str | None) -> None:
+    """Проиграть ответ: голос Джарвиса с сервера, иначе системный голос устройства."""
+    _speaking.set()
+    try:
+        if audio_b64:
+            try:
+                import numpy as np
+                import sounddevice as sd
+
+                with wave.open(io.BytesIO(base64.b64decode(audio_b64))) as w:
+                    pcm = np.frombuffer(w.readframes(w.getnframes()), np.int16)
+                    sd.play(pcm, w.getframerate())
+                    sd.wait()
+                return
+            except Exception:  # noqa: BLE001
+                pass
+        kind = detect_kind()
+        if kind == "windows":
+            subprocess.run(["powershell", "-NoProfile", "-Command",
+                            "Add-Type -AssemblyName System.Speech; (New-Object System.Speech.Synthesis."
+                            f"SpeechSynthesizer).Speak($args[0])", text], timeout=120)
+        elif kind == "mac":
+            subprocess.run(["say", text], timeout=120)
+        elif shutil.which("termux-tts-speak"):
+            subprocess.run(["termux-tts-speak", text], timeout=120)
+        else:
+            print(f"Джарвис: {text}")
+    finally:
+        time.sleep(0.3)
+        _speaking.clear()
 
 
 # ---------------------------------------------------------------- действия
@@ -158,7 +320,7 @@ def save_cfg(cfg: dict) -> None:
         pass
 
 
-async def session(server: str, first: dict) -> dict | None:
+async def session(server: str, first: dict, utterances: asyncio.Queue | None = None) -> dict | None:
     from websockets.asyncio.client import connect
 
     local = any(h in server for h in ("localhost", "127.0.0.1"))
@@ -168,18 +330,31 @@ async def session(server: str, first: dict) -> dict | None:
         if welcome.get("type") != "welcome":
             raise PermissionError(welcome.get("error", "отказ сервера"))
         tasks = set()
-        async for raw in ws:
-            msg = json.loads(raw)
-            if msg.get("type") == "call":
-                t = asyncio.create_task(handle(ws, msg))
-                tasks.add(t)
-                t.add_done_callback(tasks.discard)
+
+        async def send_utterances():
+            while utterances is not None:
+                wav = await utterances.get()
+                await ws.send(json.dumps({"type": "utterance", "audio_b64": base64.b64encode(wav).decode()}))
+
+        sender = asyncio.create_task(send_utterances())
+        try:
+            async for raw in ws:
+                msg = json.loads(raw)
+                if msg.get("type") == "call":
+                    t = asyncio.create_task(handle(ws, msg))
+                    tasks.add(t)
+                    t.add_done_callback(tasks.discard)
+                elif msg.get("type") == "say":
+                    print(f"Джарвис: {msg.get('text', '')}")
+                    asyncio.create_task(asyncio.to_thread(speak, msg.get("text", ""), msg.get("audio_b64")))
+        finally:
+            sender.cancel()
         return welcome
 
 
 async def main_async(args) -> None:
     cfg = load_cfg()
-    info = detect()
+    info = detect(voice=args.voice)
     name = args.name or cfg.get("name") or platform.node() or info["kind"]
     server = args.server or cfg.get("server")
     if not server:
@@ -201,13 +376,22 @@ async def main_async(args) -> None:
         print(install_autostart())
     if args.once:
         return
+    if args.voice and cfg.get("device_id") and not cfg.get("voice"):
+        cfg["voice"] = True  # запомнить: автозапуск тоже будет слушать «Джарвис»
+        save_cfg(cfg)
+    voice_on = args.voice or bool(cfg.get("voice"))
+    info = detect(voice=voice_on)
+    utterances: asyncio.Queue = asyncio.Queue()
+    if voice_on:
+        threading.Thread(target=voice_listener, args=(asyncio.get_running_loop(), utterances, args.wake),
+                         daemon=True, name="voice").start()
     servers = [x.strip() for x in server.split(",") if x.strip()]  # основной, затем запасные (ретранслятор)
     delay, i = 2, 0
     while True:
         server = servers[i % len(servers)]
         try:
             await session(server, {"type": "hello", "device_id": cfg["device_id"], "token": cfg["token"],
-                                   "name": name, **info})
+                                   "name": name, **info}, utterances)
             delay = 2
         except PermissionError as e:
             raise SystemExit(f"Сервер отказал: {e}. Подключите устройство заново (--pair).")
@@ -257,6 +441,8 @@ def main() -> None:
     ap.add_argument("--name", help="как назвать устройство")
     ap.add_argument("--install", action="store_true", help="запускаться автоматически")
     ap.add_argument("--once", action="store_true", help="только подключить и выйти")
+    ap.add_argument("--voice", action="store_true", help="слушать слово «Джарвис» и говорить ответы вслух")
+    ap.add_argument("--wake", default="джарвис", help="слово пробуждения")
     asyncio.run(main_async(ap.parse_args()))
 
 

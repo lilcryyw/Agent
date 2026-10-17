@@ -52,7 +52,10 @@ class Jarvis:
         self.skills = SkillBank(m, self.workshop, data / "skills")
         self.keys = KeyRing(m)
         self.devices = DeviceHub()
-        self.gateway = Gateway(m, self.devices, port=self.s.devices_port) if self.s.devices_port else None
+        self.voice = self._make_voice(data)
+        self.gateway = Gateway(m, self.devices, port=self.s.devices_port, on_utterance=self._device_utterance,
+                               tts=(lambda t: self.voice.speak(t, "wav")[0]) if self.voice else None) \
+            if self.s.devices_port else None
         self.vault = Vault(data / "vault.bin")
         self.tools = ToolBox(m, workshop=self.workshop, skills=self.skills, keys=self.keys, devices=self.devices,
                              vault=self.vault, pairing=self.gateway.create_pairing if self.gateway else None,
@@ -61,11 +64,21 @@ class Jarvis:
         self.brain = Brain(m, self.s, client, self.tools)
         self._notifiers: list[Notifier] = []
         self.initiative = Initiative(m, m.llm, self.brain.handle_stimulus, self._notify)
-        self.voice = self._make_voice(data)
         self.api = None
+        if self.gateway is not None:
+            # Сказанное Джарвисом по своей инициативе звучит и на устройствах с динамиком.
+            self.on_notify(lambda person, text: self.gateway.say(person, text))
         self._stop = threading.Event()
         self._last_sleep: dict[str, str] = {}
         self._last_initiative = 0.0
+
+    def _device_utterance(self, owner: str, device_id: str, audio: bytes) -> tuple[str, str]:
+        if self.voice is None:
+            return "", "Голос на сервере не настроен."
+        heard = self.voice.transcribe(audio)
+        if not heard:
+            return "", ""
+        return heard, self.brain.handle(owner, heard, channel="voice", device=device_id).text
 
     def _devices_urls(self) -> str:
         urls = [self.s.devices_url] if self.s.devices_url else []
