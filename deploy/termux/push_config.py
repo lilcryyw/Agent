@@ -1,4 +1,4 @@
-"""Положить настройки (.env + ключ владельца + ключи сайта) в приватный датасет Hugging Face <имя>/jarvis-data,
+"""Положить настройки (.env + ключ владельца + ключи сайта) и архив кода в приватный датасет Hugging Face <имя>/jarvis-data,
 чтобы телефон-сервер забрал их сам при установке. Запуск с компьютера, где лежит настроенный .env:
     python deploy/termux/push_config.py
 """
@@ -38,4 +38,11 @@ repo = api.whoami()["name"] + "/jarvis-data"
 api.create_repo(repo, repo_type="dataset", private=True, exist_ok=True)
 api.upload_file(path_or_fileobj=body.encode(), path_in_repo="config.env", repo_id=repo, repo_type="dataset",
                 commit_message="Настройки Джарвиса для телефона-сервера")
-print(f"настройки загружены в приватный датасет {repo}")
+# Код: репозиторий на GitHub закрытый, поэтому телефон берёт архив кода отсюда же (последний коммит).
+import subprocess  # noqa: E402
+
+code = subprocess.run(["git", "-C", str(ROOT), "archive", "--format=tar.gz", "HEAD"], capture_output=True,
+                      check=True).stdout
+api.upload_file(path_or_fileobj=code, path_in_repo="code.tar.gz", repo_id=repo, repo_type="dataset",
+                commit_message="Код Джарвиса для телефона-сервера")
+print(f"настройки и код ({len(code) // 1024 // 1024} МБ) загружены в приватный датасет {repo}")

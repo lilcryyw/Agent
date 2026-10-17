@@ -2,15 +2,12 @@
 # Внутри Debian (proot): зависимости, код, ключи из приватного хранилища Hugging Face.
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
-BRANCH="${BRANCH:-claude/jarvis-cogmem}"
 apt-get update
-apt-get install -y --no-install-recommends python3 python3-venv python3-pip git curl ca-certificates ffmpeg \
+apt-get install -y --no-install-recommends python3 python3-venv python3-pip curl ca-certificates ffmpeg \
   nodejs npm
 ARCH=$(uname -m); case "$ARCH" in aarch64|arm64) A=arm64;; x86_64) A=amd64;; armv7l) A=arm;; *) A=$ARCH;; esac
 
-if [ -d /opt/jarvis/.git ]; then git -C /opt/jarvis pull --ff-only || true
-else git clone -b "$BRANCH" --depth 1 https://github.com/lilcryyw/Agent.git /opt/jarvis; fi
-cd /opt/jarvis
+cd /opt/jarvis  # код уже распакован сюда установщиком
 python3 -m venv .venv
 .venv/bin/pip install --upgrade pip
 .venv/bin/pip install -e '.[embeddings,devices,voice,backup]'

@@ -25,6 +25,8 @@ PROJECT="${CLOUDFLARE_PROJECT:-jarvis-app}"
 SRC="$HERE/../../jarvis/channels/webapp"
 OUT="$(mktemp -d)"
 cp -r "$SRC"/. "$OUT"/
+# Установщик сервера на Android-телефон (без секретов): curl -fsSL https://<сайт>/install.sh | bash
+cp "$HERE/../termux/install.sh" "$OUT/install.sh"
 # Адрес сервера — в отдельный файл, чтобы его можно было менять без пересборки.
 printf 'window.JARVIS_API_BASE = "%s";\n' "${JARVIS_API_BASE%/}" > "$OUT/config.js"
 
