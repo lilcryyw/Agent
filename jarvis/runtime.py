@@ -28,6 +28,15 @@ from jarvis.workshop import Workshop, from_env as workshop_from_env
 log = logging.getLogger(__name__)
 
 Notifier = Callable[[str, str], None]  # (person_id, текст)
+
+
+def _valid_tz(tz: str) -> str:
+    try:
+        ZoneInfo(tz)
+        return tz
+    except Exception:  # noqa: BLE001
+        log.warning("неизвестный часовой пояс %r — использую Europe/Moscow", tz)
+        return "Europe/Moscow"
 INITIATIVE_EVERY_S = 20 * 60
 
 
@@ -38,7 +47,7 @@ class Jarvis:
         if client is None:
             import anthropic
 
-            client = anthropic.Anthropic()
+            client = anthropic.Anthropic(max_retries=4)  # перегрузка/сеть: повторить, а не молчать
         data = Path(self.s.db_path).parent if self.s.db_path != ":memory:" else Path("data")
         # Модели речи можно держать вне папки данных (в образе), чтобы не копировать их в резервную копию.
         self.models_dir = Path(os.environ.get("JARVIS_MODELS_DIR") or data / "models")
@@ -49,7 +58,7 @@ class Jarvis:
         m.sleeper = Sleep(m.ctx, m.llm, m.facts, m.core, m.intentions)
         m.add_person(self.s.owner_id, self.s.owner_name, role="owner", timezone=self.s.owner_timezone)
         for pid, (name, role, tz) in self.s.people.items():
-            m.add_person(pid, name, role=role, timezone=tz)
+            m.add_person(pid, name, role=role, timezone=_valid_tz(tz))
 
         self.workshop = workshop or workshop_from_env()
         self.skills = SkillBank(m, self.workshop, data / "skills")
@@ -65,6 +74,11 @@ class Jarvis:
                              devices_url=self._devices_urls(), domains=[d for d in (self.s.public_domain,
                                                                                      self.s.relay_domain) if d])
         self.brain = Brain(m, self.s, client, self.tools)
+        # Органы, которым нужен «мир»: фоновые задачи будят мысль, «tell» говорит людям.
+        if hasattr(self.tools, "on_stimulus"):
+            self.tools.on_stimulus = self._background_stimulus
+        if hasattr(self.tools, "on_tell"):
+            self.tools.on_tell = self._tell
         self._notifiers: list[Notifier] = []
         self.initiative = Initiative(m, m.llm, self.brain.handle_stimulus, self._notify)
         self.speakers = self._make_speakers(self.models_dir)
@@ -129,6 +143,10 @@ class Jarvis:
         if not heard:
             return "", ""
         person, note = self.who_speaks(owner, pcm)
+        from jarvis.brain.agent import is_stop
+
+        if is_stop(heard):  # «Джарвис, стоп» — сразу, не дожидаясь текущего хода
+            return heard, "Остановил." if self.brain.cancel(person) else "Хорошо."
         return heard, self.brain.handle(person, heard, channel="voice", device=device_id, note=note).text
 
     def _devices_urls(self) -> str:
@@ -158,6 +176,28 @@ class Jarvis:
             except Exception:  # noqa: BLE001
                 log.exception("не удалось отправить сообщение")
 
+    def _background_stimulus(self, person_id: str, reason: str) -> None:
+        """Фоновая задача закончилась (или другое внутреннее событие органа): подумать и, если нужно, сказать."""
+        def job():
+            try:
+                res = self.brain.handle_stimulus(person_id, reason)
+                if res.text and not res.silent:
+                    self._notify(person_id, res.text)
+            except Exception:  # noqa: BLE001
+                log.exception("ошибка обработки фонового события")
+
+        threading.Thread(target=job, name="jarvis-stimulus", daemon=True).start()
+
+    def _tell(self, person_id: str, text: str, device: str | None = None) -> None:
+        """Сказать человеку (во все его каналы; на конкретное устройство — если указано)."""
+        if device and self.gateway is not None:
+            try:
+                self.gateway.say(person_id, text, device=device)
+                return
+            except TypeError:  # старый шлюз без выбора устройства
+                pass
+        self._notify(person_id, text)
+
     def ask(self, person_id: str, text: str, **kw) -> str:
         return self.brain.handle(person_id, text, **kw).text
 
@@ -169,22 +209,37 @@ class Jarvis:
             m.tick()
         except Exception:  # noqa: BLE001
             log.exception("ошибка пульса памяти")
-        for it in m.intentions.due():
+        try:
+            due = m.intentions.due()
+        except Exception:  # noqa: BLE001
+            log.exception("не удалось прочитать напоминания")
+            due = []
+        for it in due:
             # Напоминание проходит через мышление: Джарвис сам решает, как и что сказать (и сделать).
-            m.intentions.set_status(it.id, "fired", actor="runtime")
+            try:
+                if hasattr(m.intentions, "fire"):
+                    m.intentions.fire(it.id)  # повторяющееся — переносится на следующий раз
+                else:
+                    m.intentions.set_status(it.id, "fired", actor="runtime")
+            except Exception:  # noqa: BLE001
+                log.exception("не удалось отметить напоминание I%s", it.id)
+                continue
+            verbatim = f"Напоминание: {it.action_text}"
             try:
                 res = self.brain.handle_stimulus(it.person_id, f"Наступил срок: {it.action_text} [I{it.id}]")
-                if res.text and not res.silent:
+                if res.over_budget:
+                    self._notify(it.person_id, verbatim)  # без «мысли», но напоминание важнее бюджета
+                elif res.text and not res.silent:
                     self._notify(it.person_id, res.text)
             except Exception:  # noqa: BLE001 — нет сети/ключа: напомнить хотя бы дословно
                 log.exception("мышление недоступно — напоминаю дословно")
-                self._notify(it.person_id, f"Напоминание: {it.action_text}")
+                self._notify(it.person_id, verbatim)
         now = m.ctx.clock.now()
         run_initiative = now - self._last_initiative >= INITIATIVE_EVERY_S
         if run_initiative:
             self._last_initiative = now
         for r in m.ctx.db.query("SELECT id, timezone FROM persons"):
-            local = datetime.fromtimestamp(now, ZoneInfo(r["timezone"]))
+            local = datetime.fromtimestamp(now, ZoneInfo(_valid_tz(r["timezone"])))
             key = local.date().isoformat()
             if local.hour == self.s.sleep_hour_local and self._last_sleep.get(r["id"]) != key:
                 self._last_sleep[r["id"]] = key
@@ -217,7 +272,10 @@ class Jarvis:
 
         def loop():
             while not self._stop.wait(interval_s):
-                self.pulse()
+                try:
+                    self.pulse()
+                except Exception:  # noqa: BLE001 — пульс не должен умирать от одной ошибки
+                    log.exception("ошибка пульса")
 
         t = threading.Thread(target=loop, name="jarvis-pulse", daemon=True)
         t.start()

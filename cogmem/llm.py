@@ -23,15 +23,42 @@ PRICES: dict[str, tuple[float, float, float, float]] = {
 }
 
 
+_warned: set[str] = set()
+WEB_SEARCH_USD = 0.01  # за один запрос поиска (серверный инструмент)
+
+
+def price_for(model: str) -> tuple[float, float, float, float]:
+    """Цена модели; датированные и «альясные» имена (claude-sonnet-5-5-20260901) — по семейству.
+    Неизвестная модель считается по самой дорогой цене: лучше переоценить, чем отключить лимиты бюджета."""
+    if model in PRICES:
+        return PRICES[model]
+    for name, p in PRICES.items():
+        if model.startswith(name):
+            return p
+    for fam in ("haiku", "sonnet", "opus"):
+        if fam in model:
+            return next(p for n, p in PRICES.items() if fam in n)
+    if model not in _warned:
+        _warned.add(model)
+        log.warning("нет цены для модели %s — считаю по самой дорогой", model)
+    return max(PRICES.values(), key=lambda p: p[1])
+
+
 def cost_usd(model: str, usage: Any) -> float:
-    p = PRICES.get(model)
-    if p is None or usage is None:
+    if usage is None:
         return 0.0
-    inp = getattr(usage, "input_tokens", 0) or 0
-    out = getattr(usage, "output_tokens", 0) or 0
-    cr = getattr(usage, "cache_read_input_tokens", 0) or 0
-    cw = getattr(usage, "cache_creation_input_tokens", 0) or 0
-    return (inp * p[0] + out * p[1] + cr * p[2] + cw * p[3]) / 1e6
+    p = price_for(model)
+    g = lambda o, k: (getattr(o, k, 0) if not isinstance(o, dict) else o.get(k, 0)) or 0  # noqa: E731
+    inp, out = g(usage, "input_tokens"), g(usage, "output_tokens")
+    cr, cw = g(usage, "cache_read_input_tokens"), g(usage, "cache_creation_input_tokens")
+    # Запись в кэш на 1 час стоит 2× входа, на 5 минут — 1.25×.
+    detail = getattr(usage, "cache_creation", None) if not isinstance(usage, dict) else usage.get("cache_creation")
+    cw_1h = g(detail, "ephemeral_1h_input_tokens") if detail is not None else 0
+    cw_1h = min(cw_1h, cw)
+    tools = getattr(usage, "server_tool_use", None) if not isinstance(usage, dict) else usage.get("server_tool_use")
+    searches = g(tools, "web_search_requests") if tools is not None else 0
+    return (inp * p[0] + out * p[1] + cr * p[2] + (cw - cw_1h) * p[3] + cw_1h * p[0] * 2) / 1e6 \
+        + searches * WEB_SEARCH_USD
 
 
 UsageSink = Callable[[str, str, Any], None]  # (model, purpose, usage)

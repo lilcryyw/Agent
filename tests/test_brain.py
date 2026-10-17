@@ -132,5 +132,88 @@ def test_turn_budget_stops_runaway_loops():
     r = brain.handle("owner", "Найди всё обо всём")
     assert "Продолжать?" in r.text and len(client.calls) == 2
     # История осталась корректной: на каждый tool_use есть tool_result.
-    last = brain.sessions["owner"].messages[-1]
-    assert last["role"] == "user" and last["content"][0]["type"] == "tool_result"
+    msgs = brain.sessions["owner"].messages
+    assert msgs[-2]["role"] == "user" and msgs[-2]["content"][0]["type"] == "tool_result"
+    assert msgs[-1]["role"] == "assistant"  # ход закрыт ответом — следующий начнётся с чистой реплики
+
+
+def assert_history_valid(messages):
+    """Правила API: роли чередуются (подряд user допустимо), на каждый tool_use — tool_result, нет пустых ответов."""
+    pending = set()
+    for m in messages:
+        content = m["content"]
+        if m["role"] == "assistant":
+            assert content, "пустой ответ ассистента в истории"
+            assert not pending, f"tool_use без tool_result: {pending}"
+            pending = {b.id for b in content if getattr(b, "type", "") == "tool_use"}
+        else:
+            if isinstance(content, list):
+                ids = {b["tool_use_id"] for b in content if isinstance(b, dict) and b.get("type") == "tool_result"}
+                assert pending <= ids or not pending, f"нет результатов для {pending - ids}"
+            pending = set()
+    assert not pending
+
+
+def test_history_survives_cutoff_refusal_and_empty_answers():
+    calls = {"n": 0}
+
+    def script(call):
+        calls["n"] += 1
+        n = calls["n"]
+        if n == 1:  # обрыв по длине посреди вызова инструмента
+            return response([text_block("Сейчас"), tool_block("recall", {"query": "x", "period": None,
+                                                                         "include_outdated": False})],
+                            stop="max_tokens")
+        if n == 2:
+            return response([text_block("Готов ответ. ⟦исп: —⟧")])
+        if n == 3:  # отказ
+            return response([], stop="refusal")
+        if n == 4:  # пустой ответ
+            return response([], stop="end_turn")
+        return response([text_block("Ок ⟦исп: —⟧")])
+
+    brain, mem, clock, client = setup(script)
+    assert brain.handle("owner", "Вопрос один").text == "Готов ответ."
+    assert "не могу" in brain.handle("owner", "Вопрос два").text
+    assert brain.handle("owner", "Вопрос три").text == "Готово."
+    assert brain.handle("owner", "Вопрос четыре").text == "Ок"
+    assert_history_valid(brain.sessions["owner"].messages)
+
+
+def test_api_failure_gives_friendly_answer_and_valid_history():
+    import anthropic
+    import httpx
+
+    def script(call):
+        raise anthropic.APIConnectionError(request=httpx.Request("POST", "https://x"))
+
+    brain, mem, clock, client = setup(script)
+    r = brain.handle("owner", "Привет")
+    assert "Попробуй через минуту" in r.text
+    assert brain.sessions["owner"].messages[-1]["role"] == "assistant"
+
+
+def test_restart_keeps_thread_of_conversation():
+    brain, mem, clock, client = setup(lambda call: response([text_block("Ок ⟦исп: —⟧")]))
+    brain.handle("owner", "Завтра встреча с Петровым в десять")
+    clock.advance(minutes=2)
+    brain.sessions.clear()  # как после перезапуска сервера
+    brain.handle("owner", "Напомни, с кем встреча?")
+    first = str(client.calls[-1]["messages"][0])
+    assert "<недавний_разговор>" in first and "Петровым" in first
+
+
+def test_cancel_stops_tool_loop():
+    import threading
+
+    ev = threading.Event()
+
+    def script(call):
+        ev.set()  # человек сказал «стоп», пока модель думала
+        return response([tool_block("recall", {"query": "x", "period": None, "include_outdated": False})],
+                        stop="tool_use")
+
+    brain, mem, clock, client = setup(script)
+    r = brain.handle("owner", "Найди всё", cancel=ev)
+    assert "остановил" in r.text and len(client.calls) == 1
+    assert_history_valid(brain.sessions["owner"].messages)

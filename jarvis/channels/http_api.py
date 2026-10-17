@@ -25,6 +25,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from cogmem.types import Observation
+from jarvis.brain.agent import is_stop
 
 log = logging.getLogger(__name__)
 MAX_BODY = 25 * 1024 * 1024
@@ -67,6 +68,13 @@ class Api:
         self._outbox: dict[str, deque] = defaultdict(lambda: deque(maxlen=50))
         if hasattr(jarvis, "on_notify"):
             jarvis.on_notify(lambda person, text: self._outbox[person].append(text))
+
+    def _stop(self, person: str, text: str) -> str | None:
+        """«Стоп» — сразу, без очереди: прерываем текущий ход, если он идёт."""
+        if not is_stop(text):
+            return None
+        brain = self.j.brain
+        return "Остановил." if getattr(brain, "cancel", None) and brain.cancel(person) else "Хорошо, ничего не делаю."
 
     def start(self) -> None:
         api = self
@@ -134,6 +142,8 @@ class Api:
                         text = json.loads(body or b"{}").get("text", "").strip()
                         if not text:
                             return self._json(400, {"error": "пустой текст"})
+                        if stopped := api._stop(person, text):
+                            return self._json(200, {"reply": stopped})
                         r = api.j.brain.handle(person, text, channel="api", device=device)
                         return self._json(200, {"reply": r.text})
                     if u.path == "/api/voice":
@@ -145,11 +155,12 @@ class Api:
                             api.j.enroll_voice(person, pcm)  # личный канал: голос точно этого человека
                         if not heard:
                             return self._json(200, {"heard": "", "reply": "Не расслышал, повтори, пожалуйста."})
-                        r = api.j.brain.handle(person, heard, channel="voice", device=device)
+                        reply = api._stop(person, heard) or \
+                            api.j.brain.handle(person, heard, channel="voice", device=device).text
                         if parse_qs(u.query).get("reply") == ["audio"]:
-                            audio, mime = api.voice.speak(r.text, "mp3")
+                            audio, mime = api.voice.speak(reply, "mp3")
                             return self._send(200, audio, mime)
-                        return self._json(200, {"heard": heard, "reply": r.text})
+                        return self._json(200, {"heard": heard, "reply": reply})
                     if u.path == "/api/speak":
                         if api.voice is None:
                             return self._json(501, {"error": "голос не настроен на сервере"})
@@ -171,7 +182,9 @@ class Api:
                     self._json(404, {"error": "нет такого адреса"})
                 except Exception as exc:  # noqa: BLE001
                     log.exception("ошибка API")
-                    self._json(500, {"error": f"{type(exc).__name__}"})
+                    # Команды Siri и веб-приложение показывают reply — пусть человек увидит понятный ответ.
+                    self._json(503, {"error": f"{type(exc).__name__}",
+                                     "reply": "Что-то пошло не так у меня внутри. Попробуй ещё раз через минуту."})
 
         self._srv = ThreadingHTTPServer((self.host, self.port), Handler)
         self.port = self._srv.server_address[1]

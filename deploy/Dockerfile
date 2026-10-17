@@ -10,7 +10,7 @@ COPY cogmem ./cogmem
 COPY jarvis ./jarvis
 COPY evals ./evals
 COPY clients ./clients
-RUN pip install --no-cache-dir -e '.[embeddings,telegram,devices,voice]'
+RUN pip install --no-cache-dir -e '.[embeddings,telegram,devices,voice,backup]'
 
 VOLUME ["/app/data"]
 ENV HF_HOME=/app/data/models/hf

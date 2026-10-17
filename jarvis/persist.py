@@ -30,10 +30,21 @@ def _api():
     return HfApi(token=os.environ.get("HF_TOKEN"))
 
 
+def _add(tar: tarfile.TarFile, path: Path, arcname: str) -> None:
+    """Добавить файл без меток времени и владельца — одинаковые данные дают одинаковый архив."""
+    info = tar.gettarinfo(str(path), arcname=arcname)
+    info.mtime, info.uid, info.gid, info.uname, info.gname = 0, 0, 0, "", ""
+    with open(path, "rb") as f:
+        tar.addfile(info, f)
+
+
 def snapshot(data: Path) -> bytes:
     """Упаковать папку данных. База SQLite копируется через backup API — согласованно, даже во время записи."""
     buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+    import gzip
+
+    gz = gzip.GzipFile(fileobj=buf, mode="wb", mtime=0)
+    with tarfile.open(fileobj=gz, mode="w") as tar:
         for p in sorted(data.rglob("*")):
             rel = p.relative_to(data)
             if not p.is_file() or rel.parts[0] in SKIP or p.name.endswith(("-wal", "-shm", "-journal", ".part")):
@@ -46,9 +57,10 @@ def snapshot(data: Path) -> bytes:
                         src.backup(dst)
                     src.close()
                     dst.close()
-                    tar.add(tmp, arcname=str(rel))
+                    _add(tar, tmp, str(rel))
             else:
-                tar.add(p, arcname=str(rel))
+                _add(tar, p, str(rel))
+    gz.close()
     return buf.getvalue()
 
 
@@ -58,6 +70,10 @@ def restore(data: Path, repo: str) -> bool:
     from huggingface_hub.errors import EntryNotFoundError, RemoteEntryNotFoundError, RepositoryNotFoundError
 
     data.mkdir(parents=True, exist_ok=True)
+    if any(data.glob("*.db")):
+        # Диск сохранился (VPS, перезапуск без потери данных) — локальные данные новее копии, не трогаем.
+        log.info("локальная память на месте — восстановление из копии не нужно")
+        return False
     api = _api()
     api.create_repo(repo, repo_type="dataset", private=True, exist_ok=True)
     try:
@@ -66,6 +82,8 @@ def restore(data: Path, repo: str) -> bool:
     except (EntryNotFoundError, RemoteEntryNotFoundError, RepositoryNotFoundError):
         log.info("резервной копии ещё нет — начинаю с чистой памяти")
         return False
+    for leftover in list(data.glob("*.db-wal")) + list(data.glob("*.db-shm")):
+        leftover.unlink()  # старый журнал SQLite поверх восстановленной базы её испортит
     with tarfile.open(path, "r:gz") as tar:
         tar.extractall(data, filter="data")
     log.info("память восстановлена из %s", repo)

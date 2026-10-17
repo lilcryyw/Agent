@@ -193,3 +193,28 @@ def test_backup_snapshot_restores_memory(tmp_path):
         tar.extractall(out, filter="data")
     assert "models/big.onnx" not in names and "skills/SKILL.md" in names
     assert sqlite3.connect(out / "jarvis.db").execute("SELECT x FROM t").fetchone()[0] == "мама любит пионы"
+
+
+def test_call_survives_tts_failure(server):
+    from websockets.sync.client import connect
+
+    srv, token, seen = server
+    real = srv.voice.speak
+
+    def flaky(text, fmt):
+        if "солнечно" in text:
+            raise RuntimeError("синтез сломался")
+        return real(text, fmt)
+
+    srv.voice.speak = flaky
+    with connect(f"ws://127.0.0.1:{srv.port}", proxy=None) as ws:
+        ws.send(json.dumps({"type": "hello", "token": token}))
+        recv_until(ws, "done")
+        ws.send(json.dumps({"type": "played", "turn": 1}))
+        for _ in range(2):  # два вопроса подряд: после сбоя голоса звонок не «глохнет»
+            stream(ws, tone(1.0) + silence(1.2))
+            got, audio = recv_until(ws, "done")
+            said = [m["text"] for m in got if m["type"] == "say"]
+            assert "Завтра в Париже солнечно." in said  # текстом пришло, хоть и без звука
+            ws.send(json.dumps({"type": "played", "turn": got[-1]["turn"]}))
+        assert len(seen) == 2

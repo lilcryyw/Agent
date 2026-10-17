@@ -197,6 +197,8 @@ class Call:
         self._last_enroll = 0.0
         self._state = ""
         self._quiet_since = 0.0        # когда Джарвис замолчал (хвост эха ещё может прийти)
+        self._cancel = threading.Event()  # отмена текущего хода «сознания» (перебили)
+        self._tasks: set[asyncio.Task] = set()
 
     # --- отправка ---
     async def send(self, obj: dict) -> None:
@@ -208,21 +210,35 @@ class Call:
             await self.send({"type": "state", "state": st})
 
     async def _say(self, turn: int, text: str) -> bool:
-        """Синтез и отправка одного предложения; False — ход отменён."""
-        audio, _ = await self.loop.run_in_executor(None, self.voice.speak, speakable(text), "mp3")
+        """Синтез и отправка одного предложения; False — ход отменён или звука нет (текст всё равно уходит)."""
+        try:
+            audio, _ = await self.loop.run_in_executor(None, self.voice.speak, speakable(text), "mp3")
+        except Exception:  # noqa: BLE001 — голос сломался: хотя бы текстом
+            log.exception("синтез речи не удался")
+            audio = None
         if turn in self.cancelled:
+            return False
+        await self.send({"type": "say", "turn": turn, "text": text})
+        if audio is None:
             return False
         self.playing = turn
         await self.state("speaking")
-        await self.send({"type": "say", "turn": turn, "text": text})
         await self.ws.send(struct.pack(">I", turn) + audio)
         self.spoken.append(text)
         return True
+
+    def _spawn(self, coro) -> None:
+        t = asyncio.create_task(coro)
+        self._tasks.add(t)
+        t.add_done_callback(self._tasks.discard)
 
     # --- главный цикл ---
     async def run(self) -> None:
         await self.send({"type": "ready"})
         workers = [asyncio.create_task(self._hearing()), asyncio.create_task(self._thinking())]
+        for w in workers:  # упавший «орган» звонка — не тихая глухота, а закрытое соединение
+            w.add_done_callback(lambda t: t.cancelled() or t.exception() is None or
+                                self._spawn(self.ws.close(1011, "внутренняя ошибка")))
         try:
             self.turn = 1
             await self._say(self.turn, GREETING)
@@ -240,7 +256,8 @@ class Call:
         except Exception as exc:  # noqa: BLE001 — обрыв связи и т.п.
             log.info("звонок прервался: %s", type(exc).__name__)
         finally:
-            for w in workers:
+            self._cancel.set()
+            for w in workers + list(self._tasks):
                 w.cancel()
 
     def _audio(self, pcm: bytes) -> None:
@@ -251,7 +268,7 @@ class Call:
             self.phrases.put_nowait(phrase)
         if self.seg.in_speech and self.seg.speech_ms >= BARGE_MS and not self._barge_check and self._busy():
             self._barge_check = True
-            asyncio.create_task(self._maybe_barge(self.seg.current()))
+            self._spawn(self._maybe_barge(self.seg.current()))
 
     def _busy(self) -> bool:
         return (self.thinking or self.playing is not None) and self.turn not in self.cancelled
@@ -271,7 +288,11 @@ class Call:
 
     async def _maybe_barge(self, pcm: bytes) -> None:
         """Речь поверх ответа: если это не эхо — замолчать и слушать."""
-        heard = await self.loop.run_in_executor(None, lambda: self.voice.transcribe(b"", pcm=pcm))
+        try:
+            heard = await self.loop.run_in_executor(None, lambda: self.voice.transcribe(b"", pcm=pcm))
+        except Exception:  # noqa: BLE001
+            log.exception("распознавание (перебивание) не удалось")
+            return
         if heard and not is_echo(heard, self.spoken) and self._busy():
             await self.interrupt()
 
@@ -280,6 +301,7 @@ class Call:
         if t in self.cancelled:
             return
         self.cancelled.add(t)
+        self._cancel.set()  # останавливаем и мысль, и инструменты — не только голос
         if self.spoken:
             said = " ".join(self.spoken)[-300:]
             self.note = f"Тебя перебили: человек заговорил, когда ты успел сказать только «{said}»."
@@ -294,23 +316,31 @@ class Call:
     async def _hearing(self) -> None:
         while True:
             pcm = await self.phrases.get()
-            if len(pcm) / 2 / RATE < MIN_PHRASE_S:
-                continue
-            heard = await self.loop.run_in_executor(None, lambda: self.voice.transcribe(b"", pcm=pcm))
-            if not heard:
-                continue
-            busy = self._busy()
-            echo_window = busy or time.time() - self._quiet_since < 4
-            if echo_window and is_echo(heard, self.spoken):
-                continue
-            await self.send({"type": "heard", "text": heard})
-            if busy:
-                await self.interrupt()
-            elif len(pcm) / 2 / RATE >= 1.5 and time.time() - self._last_enroll > ENROLL_EVERY_S \
-                    and hasattr(self.j, "enroll_voice"):
-                self._last_enroll = time.time()  # личный канал: голос точно этого человека
-                self.j.enroll_voice(self.person, pcm)
-            self.texts.put_nowait(heard)
+            try:
+                await self._hear(pcm)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 — одна неудачная фраза не должна оглушить звонок
+                log.exception("ошибка распознавания фразы")
+
+    async def _hear(self, pcm: bytes) -> None:
+        if len(pcm) / 2 / RATE < MIN_PHRASE_S:
+            return
+        heard = await self.loop.run_in_executor(None, lambda: self.voice.transcribe(b"", pcm=pcm))
+        if not heard:
+            return
+        busy = self._busy()
+        echo_window = busy or time.time() - self._quiet_since < 4
+        if echo_window and is_echo(heard, self.spoken):
+            return
+        await self.send({"type": "heard", "text": heard})
+        if busy:
+            await self.interrupt()
+        elif len(pcm) / 2 / RATE >= 1.5 and time.time() - self._last_enroll > ENROLL_EVERY_S \
+                and hasattr(self.j, "enroll_voice"):
+            self._last_enroll = time.time()  # личный канал: голос точно этого человека
+            self.j.enroll_voice(self.person, pcm)
+        self.texts.put_nowait(heard)
 
     # --- мысль: текст → ответ голосом ---
     async def _thinking(self) -> None:
@@ -318,13 +348,21 @@ class Call:
             text = await self.texts.get()
             while not self.texts.empty():  # сказал несколько фраз подряд — это одна реплика
                 text += " " + self.texts.get_nowait()
-            await self._turn(text)
+            try:
+                await self._turn(text)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                log.exception("ошибка хода в звонке")
+            finally:
+                self.thinking = False
 
     async def _turn(self, text: str) -> None:
         self.turn += 1
         turn = self.turn
         self.spoken = []
         self.thinking = True
+        self._cancel = cancel = threading.Event()
         note, self.note = self.note, None
         await self.state("thinking")
         sentences: asyncio.Queue[str | None] = asyncio.Queue()
@@ -337,7 +375,8 @@ class Call:
         def work():
             try:
                 return self.j.brain.handle(self.person, text, channel="call", device=self.device, note=note,
-                                           on_text=lambda chunk: put(splitter.feed(chunk)), effort=self.srv.effort)
+                                           on_text=lambda chunk: put(splitter.feed(chunk)), effort=self.srv.effort,
+                                           cancel=cancel)
             finally:
                 put(splitter.flush())
                 put([None])
@@ -354,8 +393,8 @@ class Call:
             r = None
         self.thinking = False
         if turn in self.cancelled:
-            if r is not None:
-                await self.send({"type": "reply", "turn": turn, "text": r.text})
+            if r is not None and self.spoken:  # в чат — то, что успел сказать (остальное он не слышал)
+                await self.send({"type": "reply", "turn": turn, "text": " ".join(self.spoken)})
             return
         if r is None:
             sent_any = await self._say(turn, "Что-то пошло не так, повтори, пожалуйста.")
