@@ -25,6 +25,7 @@ class WorkingMemory:
     entities: list[Recalled] = field(default_factory=list)
     intentions: list[str] = field(default_factory=list)
     procedures: list[str] = field(default_factory=list)
+    goals: list[str] = field(default_factory=list)
     period_label: str | None = None
     tokens: int = 0
 
@@ -37,7 +38,8 @@ class WorkingMemory:
         return refs
 
     def is_empty(self) -> bool:
-        return not (self.facts or self.episodes or self.entities or self.intentions or self.procedures)
+        return not (self.facts or self.episodes or self.entities or self.intentions or self.procedures
+                    or self.goals)
 
     def render(self) -> str:
         parts: list[str] = []
@@ -55,11 +57,14 @@ class WorkingMemory:
                     parts += [f"    · [{q.ref}] {q.text}" for q in quotes]
                 else:
                     parts += [f"- [{q.ref}] {q.text}" for q in quotes]
+        if self.goals:
+            parts.append("Твои текущие цели (довести до конца):")
+            parts += [f"- {g}" for g in self.goals]
         if self.intentions:
             parts.append("Намерения (не забыть):")
             parts += [f"- {i}" for i in self.intentions]
         if self.procedures:
-            parts.append("Известные рецепты действий:")
+            parts.append("Подходящие навыки и рецепты (что ты уже умеешь):")
             parts += [f"- {p}" for p in self.procedures]
         if not parts:
             return "Ничего относящегося к делу в памяти не найдено."
@@ -114,7 +119,7 @@ def _mmr(items: list[Recalled], ctx: Ctx, lam: float, limit: int) -> list[Recall
 
 def pack(ctx: Ctx, result: RecallResult, viewer: str, *, budgets: Budgets | None = None,
          intentions: list[str] | None = None, procedures: list[str] | None = None,
-         exclude_refs: set[str] | None = None) -> WorkingMemory:
+         exclude_refs: set[str] | None = None, goals: list[str] | None = None) -> WorkingMemory:
     """exclude_refs — уже показанное в этом разговоре (оно и так в истории; не повторяем)."""
     b = budgets or ctx.cfg.budgets
     wm = WorkingMemory(period_label=result.time_range.label if result.time_range else None)
@@ -185,6 +190,7 @@ def pack(ctx: Ctx, result: RecallResult, viewer: str, *, budgets: Budgets | None
         if cost <= budget:
             wm.procedures.append(line)
             budget -= cost
+    wm.goals = list(goals or [])  # цели показываем всегда — это «то, чем я сейчас занят»
     wm.tokens = estimate_tokens(wm.render())
     return wm
 

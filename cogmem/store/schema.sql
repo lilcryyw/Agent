@@ -253,3 +253,33 @@ CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(
     text,
     tokenize = 'unicode61 remove_diacritics 2'
 );
+
+-- Цели: долгие задачи, которые живут днями (шаги, статус, когда вернуться к ним).
+CREATE TABLE IF NOT EXISTS goals (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    person_id   TEXT NOT NULL,
+    title       TEXT NOT NULL,
+    notes       TEXT NOT NULL DEFAULT '',
+    status      TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','blocked','done','dropped')),
+    next_check  REAL,
+    created_at  REAL NOT NULL,
+    updated_at  REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_goals_person ON goals(person_id, status);
+
+-- Ключи: разрешения, которые человек выдаёт сам на действия «под замком».
+CREATE TABLE IF NOT EXISTS keys (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    person_id         TEXT NOT NULL,          -- чьим именем/деньгами действует Джарвис
+    scope             TEXT NOT NULL CHECK (scope IN ('money','message','delete','relative_device')),
+    target            TEXT NOT NULL DEFAULT '',  -- '' — любой; иначе человек/магазин/канал
+    limit_eur         REAL,                   -- лимит суммы (для денег), NULL — без лимита
+    spent_eur         REAL NOT NULL DEFAULT 0,
+    uses              INTEGER NOT NULL DEFAULT 0,
+    once              INTEGER NOT NULL DEFAULT 0,
+    expires_at        REAL,
+    granted_at        REAL NOT NULL,
+    evidence_event_id INTEGER,
+    revoked_at        REAL
+);
+CREATE INDEX IF NOT EXISTS ix_keys_person ON keys(person_id, scope);

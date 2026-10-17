@@ -15,6 +15,8 @@ PREFIX: dict[str, str] = {
     "entity": "N",
     "procedure": "P",
     "intention": "I",
+    "goal": "G",
+    "key": "K",
 }
 PREFIX_TO_TYPE = {v: k for k, v in PREFIX.items()}
 
@@ -25,6 +27,8 @@ TABLE: dict[str, str] = {
     "entity": "entities",
     "procedure": "procedures",
     "intention": "intentions",
+    "goal": "goals",
+    "key": "keys",
 }
 
 

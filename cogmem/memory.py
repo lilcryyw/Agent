@@ -24,6 +24,7 @@ from cogmem.embed import Embedder, default_embedder
 from cogmem.entities import EntityStore
 from cogmem.episodes import EpisodeStream, ObserveResult
 from cogmem.facts import FactStore
+from cogmem.goals import Goals
 from cogmem.govern.access import can_see
 from cogmem.govern.audit import Audit
 from cogmem.govern.write_gate import GateReport, WriteGate
@@ -94,6 +95,7 @@ class CognitiveMemory:
         self.core = CoreBlocks(self.ctx, self.facts)
         self.intentions = Intentions(self.ctx)
         self.procedures = Procedures(self.ctx)
+        self.goals = Goals(self.ctx)
         self.gate = WriteGate(self.ctx, self.entities, self.facts, self.intentions)
         self.llm = llm
         self.encoder = EpisodeEncoder(self.ctx, llm, self.entities, self.facts, self.episodes, self.retriever) \
@@ -139,7 +141,8 @@ class CognitiveMemory:
                                     deep=deep, history=history, time_range=time_range)
         wm = pack(self.ctx, res, person_id, budgets=budgets,
                   intentions=self.intentions.relevant(person_id, cue),
-                  procedures=self.procedures.relevant(person_id, cue), exclude_refs=exclude_refs)
+                  procedures=self.procedures.relevant(person_id, cue, k=4), exclude_refs=exclude_refs,
+                  goals=self.goals.lines(person_id))
         return wm, res
 
     def core_profile(self, person_id: str, *, rebuild: bool = True) -> str:

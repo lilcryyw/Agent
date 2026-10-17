@@ -53,6 +53,28 @@ async def run() -> None:
         if pid:
             await msg.answer(j.memory.core_profile(pid))
 
+    @dp.message(Command("secret"))
+    async def secret(msg: Message) -> None:
+        """/secret имя значение — положить в сейф; сообщение с секретом сразу удаляется из чата."""
+        if not person_of(msg):
+            return
+        parts = (msg.text or "").split(maxsplit=2)
+        try:
+            await msg.delete()
+        except Exception:  # noqa: BLE001 — нет прав удалить: всё равно сохраняем
+            pass
+        if len(parts) < 3:
+            await bot.send_message(msg.chat.id, "Формат: /secret имя значение")
+            return
+        j.vault.set(parts[1], parts[2])
+        await bot.send_message(msg.chat.id, f"🔐 Секрет «{parts[1]}» в сейфе. Сообщение с ним удалено.")
+
+    @dp.message(Command("keys"))
+    async def keys(msg: Message) -> None:
+        pid = person_of(msg)
+        if pid:
+            await msg.answer("\n".join(j.keys.lines(pid)) or "Ключей нет.")
+
     @dp.message(F.voice)
     async def voice(msg: Message) -> None:
         if person_of(msg):

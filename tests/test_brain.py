@@ -7,13 +7,26 @@ from jarvis.config import Settings
 from tests.fake_claude import FakeClaude, response, text_block, tool_block
 
 
-def setup(script):
+def setup(script, tmp_path=None):
+    import tempfile
+
+    from jarvis.brain.tools import ToolBox
+    from jarvis.devices import DeviceHub
+    from jarvis.keys import KeyRing
+    from jarvis.secrets import Vault
+    from jarvis.skills import SkillBank
+    from jarvis.workshop import LocalWorkshop
+
+    root = tempfile.mkdtemp()
     clock = FakeClock()
     mem = CognitiveMemory(embedder=HashEmbedder(), clock=clock)
     mem.add_person("owner", "Владимир", role="owner")
     s = Settings(db_path=":memory:", use_web_search=False)
     client = FakeClaude(script)
-    return Brain(mem, s, client), mem, clock, client
+    ws = LocalWorkshop(f"{root}/ws", skills_dir=f"{root}/skills")
+    tools = ToolBox(mem, workshop=ws, skills=SkillBank(mem, ws, f"{root}/skills"), keys=KeyRing(mem),
+                    devices=DeviceHub(), vault=Vault(f"{root}/vault.bin"))
+    return Brain(mem, s, client, tools), mem, clock, client
 
 
 def last_user_text(call):
@@ -37,14 +50,14 @@ def test_turn_with_tool_and_append_only_history():
                 last["content"][0].get("type") == "tool_result":
             return response([text_block("Запомнил! ⟦исп: —⟧")])
         if "Запомни" in last_user_text(call):
-            return response([tool_block("memory_remember", {"statement": "У мамы аллергия на пенициллин",
-                                                           "about": "мама", "importance": 0.9,
-                                                           "share_with_family": False})], stop="tool_use")
+            return response([tool_block("note", {"op": "remember", "text": "У мамы аллергия на пенициллин",
+                                                "about": "мама", "ref": None, "share_with_family": False})],
+                            stop="tool_use")
         return response([text_block("У мамы аллергия на пенициллин. ⟦исп: F1⟧")], cache_read=3000)
 
     brain, mem, clock, client = setup(script)
     r1 = brain.handle("owner", "Запомни: у мамы аллергия на пенициллин")
-    assert r1.text == "Запомнил!" and r1.tool_calls == ["memory_remember"]
+    assert r1.text == "Запомнил!" and r1.tool_calls == ["note"]
     assert mem.facts.get(1).statement == "У мамы аллергия на пенициллин"
     clock.advance(minutes=2)
     r2 = brain.handle("owner", "На что у мамы аллергия?")
@@ -94,3 +107,19 @@ def test_budget_cap_stops_calls():
     brain.handle("owner", "Привет")          # этот вызов «съест» бюджет ($40 при Opus)
     r = brain.handle("owner", "Ещё вопрос")  # а этот уже не пойдёт в API
     assert "бюджет" in r.text and len(client.calls) == 1
+
+
+def test_internal_stimulus_can_stay_silent_and_cannot_grant_keys():
+    def script(call):
+        last = call["messages"][-1]
+        if last["role"] == "user" and isinstance(last["content"], list) and last["content"] and \
+                last["content"][0].get("type") == "tool_result":
+            return response([text_block("⟦молчу⟧")])
+        return response([tool_block("key_grant", {"scope": "money", "target": None, "limit_eur": 1000,
+                                                  "duration": "forever"})], stop="tool_use")
+
+    brain, mem, clock, client = setup(script)
+    r = brain.handle_stimulus("owner", "Подошёл срок цели")
+    assert r.silent and r.text == ""
+    assert brain.tools.keys.active("owner") == []  # по своей инициативе ключ не выдать
+    assert "<внутренний_повод>" in str(client.calls[0]["messages"][-1])

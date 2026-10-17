@@ -1,4 +1,4 @@
-# Запуск на VPS:  cd deploy && cp ../.env.example ../.env && nano ../.env && docker compose up -d --build
+# Запуск на VPS:  cp ../.env.example ../.env && nano ../.env && docker compose up -d --build
 services:
   jarvis:
     build:
@@ -7,6 +7,25 @@ services:
     env_file: ../.env
     environment:
       JARVIS_DB: /app/data/jarvis.db
+      JARVIS_WORKSHOP_URL: http://workshop:8700
     volumes:
-      - ../data:/app/data          # база памяти + кэш модели эмбеддингов (бэкапить эту папку!)
+      - ../data:/app/data            # память, навыки, сейф, кэш модели смыслов (бэкапить эту папку!)
+    depends_on: [workshop]
+    restart: unless-stopped
+
+  # Мастерская: здесь Джарвис выполняет свой код. Отдельный контейнер — без базы памяти, сейфа и ключа API.
+  workshop:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: ["python", "-m", "jarvis.workshop.server"]
+    environment:
+      JARVIS_WORKSHOP_TOKEN: ${JARVIS_WORKSHOP_TOKEN}
+      WORKSHOP_ROOT: /data/workshop
+      WORKSHOP_SKILLS: /data/skills
+    volumes:
+      - ../data/workshop:/data/workshop
+      - ../data/skills:/data/skills:ro
+    mem_limit: 2g
+    pids_limit: 512
     restart: unless-stopped

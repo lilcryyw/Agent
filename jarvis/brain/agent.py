@@ -19,7 +19,7 @@ from typing import Any
 
 from cogmem.memory import CognitiveMemory
 from cogmem.types import Observation
-from jarvis.brain.prompts import SYSTEM_PROMPT
+from jarvis.brain.prompts import SILENCE, SYSTEM_PROMPT
 from jarvis.brain.tools import ToolBox
 from jarvis.config import Settings
 
@@ -29,9 +29,9 @@ WEEKDAYS = ["понедельник", "вторник", "среда", "четв�
 MONTHS_GEN = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября",
               "ноября", "декабря"]
 USED_RE = re.compile(r"⟦\s*исп\s*:([^⟧]*)⟧")
-REF_RE = re.compile(r"\[([FEMNPI]\d+)\]")
+REF_RE = re.compile(r"\[([FEMNPIGK]\d+)\]")
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
-MAX_STEPS = 12
+MAX_STEPS = 30  # свобода искать способ: попытки, код, навыки — но не бесконечно
 
 
 @dataclass
@@ -52,6 +52,7 @@ class TurnResult:
     cost_usd: float
     usage: dict[str, int]
     new_session: bool
+    silent: bool = False  # внутренний повод: Джарвис решил не беспокоить
 
 
 def human_now(dt: datetime) -> str:
@@ -68,15 +69,11 @@ def split_used(text: str) -> tuple[str, list[str]]:
 
 
 class Brain:
-    def __init__(self, memory: CognitiveMemory, settings: Settings, client: Any = None):
+    def __init__(self, memory: CognitiveMemory, settings: Settings, client: Any, tools: ToolBox):
         self.memory = memory
         self.s = settings
-        if client is None:
-            import anthropic
-
-            client = anthropic.Anthropic()
         self.client = client
-        self.tools = ToolBox(memory)
+        self.tools = tools
         self.sessions: dict[str, Session] = {}
         self._locks: dict[str, threading.Lock] = {}
         self._fallbacks_ok = settings.use_fallbacks
@@ -87,7 +84,7 @@ class Brain:
             model=self.s.brain_model,
             max_tokens=self.s.max_tokens,
             system=[{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral", "ttl": "1h"}}],
-            tools=self.tools.definitions(web_search=self.s.use_web_search),
+            tools=self.tools.definitions(web=self.s.use_web_search),
             messages=messages,
             output_config={"effort": self.s.brain_effort},
         )
@@ -112,17 +109,27 @@ class Brain:
         return self._locks.setdefault(person_id, threading.Lock())
 
     def handle(self, person_id: str, text: str, *, channel: str = "text", device: str | None = None) -> TurnResult:
+        """Реплика человека."""
         with self._lock(person_id):
-            return self._handle(person_id, text, channel=channel, device=device)
+            return self._turn(person_id, text, origin="user", channel=channel, device=device)
+
+    def handle_stimulus(self, person_id: str, reason: str) -> TurnResult:
+        """Внутренний повод (цель, срок, событие): Джарвис сам решает, действовать ли и говорить ли."""
+        with self._lock(person_id):
+            return self._turn(person_id, reason, origin="internal", channel="internal", device=None)
 
     def _over_budget(self) -> bool:
         now = self.memory.local_now(self.s.owner_id) if self.memory.person(self.s.owner_id) else datetime.now()
         month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp()
         return self.memory.spend_usd(month_start) >= self.s.monthly_budget_usd
 
-    def _handle(self, person_id: str, text: str, *, channel: str, device: str | None) -> TurnResult:
+    def _turn(self, person_id: str, text: str, *, origin: str, channel: str, device: str | None) -> TurnResult:
         mem = self.memory
-        obs = mem.observe(Observation(person_id, text, speaker="user", channel=channel, device=device))
+        if origin == "user":
+            obs = mem.observe(Observation(person_id, text, speaker="user", channel=channel, device=device))
+        else:
+            obs = mem.observe(Observation(person_id, f"Внутренний повод: {text}", speaker="system", kind="stimulus",
+                                          channel=channel))
         sess = self.sessions.get(person_id)
         restarted_mid_episode = False
         new_session = sess is None or sess.episode_id != obs.episode_id or \
@@ -133,6 +140,8 @@ class Brain:
             self.sessions[person_id] = sess
 
         if self._over_budget():
+            if origin != "user":
+                return TurnResult("", [], [], [], 0.0, {}, new_session, True)
             msg = (f"Месячный бюджет на ИИ (${self.s.monthly_budget_usd:.0f}) исчерпан. "
                    "Увеличь JARVIS_MONTHLY_BUDGET_USD, если нужно продолжить.")
             mem.observe(Observation(person_id, msg, speaker="assistant", channel=channel, device=device))
@@ -156,9 +165,14 @@ class Brain:
                     blocks.append({"type": "text", "text": "<недавний_разговор>\n" + "\n".join(lines)
                                    + "\n</недавний_разговор>"})
         where = f"Канал: {channel}." + (f" Устройство: {device}." if device else "")
-        blocks.append({"type": "text", "text": f"<контекст>Сейчас: {human_now(now)} ({now.tzinfo}). {where}</контекст>\n"
-                                              f"<память>\n{wm.render()}\n</память>"})
-        blocks.append({"type": "text", "text": text})
+        keys = self.tools.keys.lines(person_id)
+        trust = self.tools.keys.trust_suggestions(person_id)
+        state = ("Ключи от замка: " + ("; ".join(keys) if keys else "нет") + "."
+                 + (" Доверие: " + "; ".join(trust) + "." if trust else ""))
+        blocks.append({"type": "text", "text": f"<контекст>Сейчас: {human_now(now)} ({now.tzinfo}). {where} {state}"
+                                              f"</контекст>\n<память>\n{wm.render()}\n</память>"})
+        blocks.append({"type": "text", "text": text if origin == "user"
+                       else f"<внутренний_повод>{text}</внутренний_повод>"})
         sess.messages.append({"role": "user", "content": blocks})
         sess.shown.update(shown_now)
 
@@ -182,7 +196,8 @@ class Brain:
                     if getattr(b, "type", "") != "tool_use":
                         continue
                     tool_calls.append(b.name)
-                    out, is_err = self.tools.run(person_id, b.name, dict(b.input), source_event_id=obs.event_id)
+                    out, is_err = self.tools.run(person_id, b.name, dict(b.input), origin=origin,
+                                                 source_event_id=obs.event_id if origin == "user" else None)
                     refs = REF_RE.findall(out)
                     sess.shown.update(refs)
                     shown_now += refs
@@ -196,8 +211,10 @@ class Brain:
             break
 
         clean, used = split_used(final_text)
-        if not clean:
-            clean = "Готово."
         mem.feedback(shown_now, used)
+        silent = origin == "internal" and (not clean or SILENCE in clean)
+        if silent:
+            return TurnResult("", used, shown_now, tool_calls, mem.spend_usd() - cost_before, total, new_session, True)
+        clean = clean.replace(SILENCE, "").strip() or "Готово."
         mem.observe(Observation(person_id, clean, speaker="assistant", channel=channel, device=device))
         return TurnResult(clean, used, shown_now, tool_calls, mem.spend_usd() - cost_before, total, new_session)

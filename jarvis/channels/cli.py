@@ -2,7 +2,8 @@
 
 Запуск:  jarvis            (или python -m jarvis.channels.cli)
 Команды: /память — статистика   /профиль — ядро   /почему F12 — источник факта
-         /сон — ночная обработка сейчас   /сброс — закрыть эпизод и закодировать   /выход
+         /сон — ночная обработка сейчас   /сброс — закрыть эпизод и закодировать
+         /секрет имя значение — в сейф    /ключи — выданные разрешения   /выход
 """
 
 from __future__ import annotations
@@ -49,6 +50,17 @@ def main(argv: list[str] | None = None) -> int:
             continue
         if line == "/сон":
             print(m.sleep(person))
+            continue
+        if line.startswith("/секрет"):
+            parts = line.split(maxsplit=2)
+            if len(parts) == 3:
+                j.vault.set(parts[1], parts[2])
+                print(f"🔐 «{parts[1]}» в сейфе.")
+            else:
+                print("Формат: /секрет имя значение")
+            continue
+        if line == "/ключи":
+            print("\n".join(j.keys.lines(person)) or "Ключей нет.")
             continue
         if line == "/сброс":
             print(m.flush(person))
