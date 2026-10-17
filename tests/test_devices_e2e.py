@@ -135,3 +135,24 @@ def test_voice_utterance_and_proactive_say(tmp_path):
     asyncio.run(scenario())
     assert heard and heard[0][0] == "owner" and heard[0][1] == b"RIFF..."
     assert not g.say("mama", "x")  # у мамы нет устройств — сказать негде
+
+
+def test_device_senses(monkeypatch):
+    import importlib.util
+    import json as _json
+
+    spec = importlib.util.spec_from_file_location("jd", CLIENT_PATH)
+    jd = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(jd)
+    state = {"level": 50, "notes": []}
+    monkeypatch.setattr(jd, "battery", lambda: (state["level"], False))
+    monkeypatch.setattr(jd.shutil, "which", lambda name: "/bin/x" if name == "termux-notification-list" else None)
+    monkeypatch.setattr(jd.subprocess, "run", lambda *a, **k: type("R", (), {"stdout": _json.dumps(state["notes"])})())
+    state["notes"] = [{"id": 1, "when": 1, "packageName": "ru.sberbank", "title": "Старое", "content": "было до запуска"}]
+    assert jd.senses_once() == []  # первый осмотр только запоминает
+    state["level"] = 15
+    state["notes"].append({"id": 2, "when": 2, "packageName": "org.telegram", "title": "Мама", "content": "Позвони мне"})
+    ev = jd.senses_once()
+    assert ("Батарея 15%, не заряжается", "observed") in ev
+    assert any(t == "external" and "Позвони мне" in text for text, t in ev)
+    assert jd.senses_once() == []  # повторно о том же не сообщает

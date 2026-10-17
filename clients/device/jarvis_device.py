@@ -307,6 +307,65 @@ async def handle(ws, msg: dict) -> None:
     await ws.send(json.dumps({"type": "result", "id": msg["id"], "ok": ok, "output": out, "image_b64": image}))
 
 
+# ---------------------------------------------------------------- органы чувств
+# Устройство само сообщает Джарвису о важном — это события (данные), а не команды.
+_senses_state: dict = {"seen": None, "low_sent": False}
+
+
+def battery() -> tuple[int | None, bool]:
+    """→ (процент заряда или None, заряжается ли)."""
+    try:
+        if shutil.which("termux-battery-status"):
+            d = json.loads(subprocess.run(["termux-battery-status"], capture_output=True, text=True, timeout=20).stdout)
+            return int(d.get("percentage")), d.get("plugged", "UNPLUGGED") != "UNPLUGGED"
+        for b in sorted(Path("/sys/class/power_supply").glob("BAT*")):
+            return int((b / "capacity").read_text()), (b / "status").read_text().strip() in ("Charging", "Full")
+        if detect_kind() == "mac":
+            out = subprocess.run(["pmset", "-g", "batt"], capture_output=True, text=True, timeout=10).stdout
+            import re
+
+            m = re.search(r"(\d+)%;\s*(\w+)", out)
+            if m:
+                return int(m.group(1)), m.group(2).lower() in ("charging", "charged", "finishing")
+        import psutil  # Windows (если установлен)
+
+        b = psutil.sensors_battery()
+        if b is not None:
+            return int(b.percent), bool(b.power_plugged)
+    except Exception:  # noqa: BLE001
+        pass
+    return None, False
+
+
+def senses_once() -> list[tuple[str, str]]:
+    """Один осмотр: → [(текст события, доверие)]. Уведомления — чужой текст (external)."""
+    st = _senses_state
+    events: list[tuple[str, str]] = []
+    level, charging = battery()
+    if level is not None:
+        if level <= 20 and not charging and not st["low_sent"]:
+            events.append((f"Батарея {level}%, не заряжается", "observed"))
+            st["low_sent"] = True
+        elif level > 30 or charging:
+            st["low_sent"] = False
+    if shutil.which("termux-notification-list"):
+        try:
+            items = json.loads(subprocess.run(["termux-notification-list"], capture_output=True, text=True,
+                                              timeout=20).stdout or "[]")
+        except Exception:  # noqa: BLE001
+            items = []
+        keys = {f"{n.get('id')}|{n.get('when')}" for n in items}
+        if st["seen"] is not None:  # первый осмотр — только запоминаем, что уже было
+            for n in items:
+                k = f"{n.get('id')}|{n.get('when')}"
+                if k in st["seen"] or n.get("packageName", "").startswith("com.termux"):
+                    continue
+                text = f"Уведомление ({n.get('packageName', '?')}): {n.get('title', '')} — {n.get('content', '')}"
+                events.append((text[:500], "external"))
+        st["seen"] = keys
+    return events[:5]
+
+
 # ---------------------------------------------------------------- связь
 def load_cfg() -> dict:
     return json.loads(CONFIG.read_text()) if CONFIG.exists() else {}
@@ -321,7 +380,8 @@ def save_cfg(cfg: dict) -> None:
         pass
 
 
-async def session(server: str, first: dict, utterances: asyncio.Queue | None = None) -> dict | None:
+async def session(server: str, first: dict, utterances: asyncio.Queue | None = None,
+                  senses: bool = True) -> dict | None:
     from websockets.asyncio.client import connect
 
     local = any(h in server for h in ("localhost", "127.0.0.1"))
@@ -337,7 +397,14 @@ async def session(server: str, first: dict, utterances: asyncio.Queue | None = N
                 wav = await utterances.get()
                 await ws.send(json.dumps({"type": "utterance", "audio_b64": base64.b64encode(wav).decode()}))
 
+        async def watch():
+            while senses:
+                for text, trust in await asyncio.to_thread(senses_once):
+                    await ws.send(json.dumps({"type": "event", "text": text, "trust": trust}))
+                await asyncio.sleep(60)
+
         sender = asyncio.create_task(send_utterances())
+        watcher = asyncio.create_task(watch())
         try:
             async for raw in ws:
                 msg = json.loads(raw)
@@ -350,6 +417,7 @@ async def session(server: str, first: dict, utterances: asyncio.Queue | None = N
                     asyncio.create_task(asyncio.to_thread(speak, msg.get("text", ""), msg.get("audio_b64")))
         finally:
             sender.cancel()
+            watcher.cancel()
         return welcome
 
 
@@ -392,7 +460,7 @@ async def main_async(args) -> None:
         server = servers[i % len(servers)]
         try:
             await session(server, {"type": "hello", "device_id": cfg["device_id"], "token": cfg["token"],
-                                   "name": name, **info}, utterances)
+                                   "name": name, **info}, utterances, not args.no_senses)
             delay = 2
         except PermissionError as e:
             raise SystemExit(f"Сервер отказал: {e}. Подключите устройство заново (--pair).")
@@ -444,6 +512,7 @@ def main() -> None:
     ap.add_argument("--once", action="store_true", help="только подключить и выйти")
     ap.add_argument("--voice", action="store_true", help="слушать слово «Джарвис» и говорить ответы вслух")
     ap.add_argument("--wake", default="джарвис", help="слово пробуждения")
+    ap.add_argument("--no-senses", action="store_true", help="не сообщать о заряде и уведомлениях")
     asyncio.run(main_async(ap.parse_args()))
 
 
