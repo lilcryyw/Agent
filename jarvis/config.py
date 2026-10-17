@@ -44,6 +44,8 @@ class Settings:
     owner_timezone: str = "Europe/Paris"
     telegram_token: str | None = None
     telegram_users: dict[int, str] = field(default_factory=dict)  # telegram id → person id
+    # Члены семьи: id → (имя, роль, часовой пояс). Владелец добавляется отдельно.
+    people: dict[str, tuple[str, str, str]] = field(default_factory=dict)
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -65,4 +67,11 @@ class Settings:
         for pair in filter(None, (p.strip() for p in users.split(","))):
             tg, pid = pair.split(":", 1)
             s.telegram_users[int(tg)] = pid.strip()
+        people = e.get("JARVIS_PEOPLE", "")  # «mama:Ольга Петровна:family:Europe/Samara;papa:...»
+        for item in filter(None, (p.strip() for p in people.split(";"))):
+            parts = [x.strip() for x in item.split(":")]
+            pid, name = parts[0], parts[1] if len(parts) > 1 else parts[0]
+            role = parts[2] if len(parts) > 2 else "family"
+            tz = ":".join(parts[3:]) if len(parts) > 3 else "Europe/Moscow"
+            s.people[pid] = (name, role, tz)
         return s
