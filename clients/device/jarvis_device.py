@@ -313,6 +313,7 @@ def load_cfg() -> dict:
 
 
 def save_cfg(cfg: dict) -> None:
+    CONFIG.parent.mkdir(parents=True, exist_ok=True)
     CONFIG.write_text(json.dumps(cfg, ensure_ascii=False, indent=2))
     try:
         CONFIG.chmod(0o600)

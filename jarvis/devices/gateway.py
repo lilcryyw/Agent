@@ -41,8 +41,14 @@ def _h(s: str) -> str:
     return hashlib.sha256(s.encode()).hexdigest()
 
 
+_TRANSLIT = dict(zip("абвгдеёжзийклмнопрстуфхцчшщъыьэюя",
+                     ["a", "b", "v", "g", "d", "e", "e", "zh", "z", "i", "y", "k", "l", "m", "n", "o", "p", "r", "s",
+                      "t", "u", "f", "h", "ts", "ch", "sh", "sch", "", "y", "", "e", "yu", "ya"]))
+
+
 def _slug(s: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")[:20] or "device"
+    s = "".join(_TRANSLIT.get(ch, ch) for ch in s.lower())
+    return re.sub(r"[^a-z0-9]+", "-", s).strip("-")[:20] or "device"
 
 
 class Gateway:
