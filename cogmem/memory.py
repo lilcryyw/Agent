@@ -120,7 +120,18 @@ class CognitiveMemory:
     def rename_person(self, person_id: str, name: str) -> bool:
         """Новое имя человека (например, настройка поменялась): имя, схема-сущность, прозвища, профиль."""
         p = self.person(person_id)
-        if p is None or not name or p["name"] == name:
+        if p is None or not name:
+            return False
+        if p["name"] == name:
+            # Переименование уже было (например, до обновления), а важного факта о нём ещё нет — дописываем.
+            row = self.ctx.db.one("SELECT reason FROM memory_audit WHERE op='rename' AND unit_type='person' "
+                                  "AND reason LIKE ? ORDER BY id DESC LIMIT 1", (f"% → {name}",))
+            mark = f"Обращаться к нему: «{name}»"
+            if row and not self.ctx.db.one("SELECT 1 FROM facts WHERE owner_person=? AND statement LIKE ? "
+                                           "AND invalidated_at IS NULL", (person_id, mark + "%")):
+                old = row["reason"].rsplit(" → ", 1)[0]
+                self.remember(person_id, f"{mark}. Имя «{old}» было ошибкой — так не называть.", importance=0.95)
+                self.core.rebuild_profile(person_id, reason="новое имя")
             return False
         from cogmem.text import ru
 
@@ -137,6 +148,12 @@ class CognitiveMemory:
             self.entities.add_alias(p["entity_id"], name)
             self.entities._alias_cache = None
         self.ctx.audit.log("system", "rename", "person", 0, reason=f"{p['name']} → {name}")
+        # Как у человека: «меня зовут иначе» — важный факт, который перевешивает старые оговорки в разговоре.
+        try:
+            self.remember(person_id, f"Обращаться к нему: «{name}». Имя «{p['name']}» было ошибкой — так не называть.",
+                          importance=0.95)
+        except Exception:  # noqa: BLE001 — профиль всё равно обновится
+            log.exception("не удалось записать факт о новом имени")
         self.core.rebuild_profile(person_id, reason="новое имя")
         return True
 
