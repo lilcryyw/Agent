@@ -27,7 +27,7 @@ def _bool(name: str, default: bool) -> bool:
 class Settings:
     db_path: str = "data/jarvis.db"
     # «Сознание»: разговор, решения, инструменты.
-    brain_model: str = "claude-opus-5-5"
+    brain_model: str = "claude-sonnet-5-5"
     brain_effort: str = "medium"
     # «Подсознание»: фоновая работа памяти.
     subconscious_model: str = "claude-haiku-5-5"
