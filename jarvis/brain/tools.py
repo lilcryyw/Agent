@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from typing import Any
 
@@ -40,6 +41,12 @@ B = {"type": "boolean"}
 EFFECTS = {"type": "array", "items": {"type": "string", "enum": ["money", "message", "delete"]},
            "description": "Что из «под замком» делает этот код: money — платит/покупает; message — пишет/звонит "
                           "людям от имени человека; delete — удаляет его личные данные. Пусто — ничего из этого."}
+
+import json as _json
+from pathlib import Path as _Path
+
+IPHONE_CATALOG = _json.loads((_Path(__file__).resolve().parents[1] / "iphone_shortcuts.json").read_text(encoding="utf-8"))
+IPHONE_IDS = [x["id"] for x in IPHONE_CATALOG]
 
 TOOLS: list[dict] = [
     {"name": "device_input",
@@ -66,6 +73,11 @@ TOOLS: list[dict] = [
     {"name": "device_screen",
      "description": "Посмотреть экран устройства (снимок). Дальше — device_input. Для того, у чего нет API.",
      "input_schema": _schema({"device": S})},
+    {"name": "iphone_action",
+     "description": "Действие на iPhone через Команду «Джарвис: …» (открыть, будильник, таймер, напоминание, событие, "
+                    "заметка, сайт, звонок, сообщение, музыка, погода, фокус). Человек нажимает кнопку одним касанием. "
+                    "Возвращает кнопку — вставь её в ответ ДОСЛОВНО, как есть. Список ids — в каталоге iphone_shortcuts.json.",
+     "input_schema": _schema({"id": {"type": "string", "enum": IPHONE_IDS}, "input": SN})},
     {"name": "family",
      "description": "Семья (только владелец). op: list — кто есть; add — добавить человека (person_id латиницей, "
                     "name, timezone вроде Europe/Samara); app_link — ссылка на голосовое веб-приложение для человека "
@@ -273,6 +285,8 @@ class ToolBox:
             return self._pair(person, a["kind"], a.get("for_person"))
         if name == "family":
             return self._family(person, a)
+        if name == "iphone_action":
+            return self._iphone(a)
         return f"Нет такого органа: {name}", True
 
     def _device_for(self, person: str, device_id: str, effects: list[str], target: str | None):
@@ -313,6 +327,15 @@ class ToolBox:
                              after={"device": dev.id, "action": a["action"], "ok": res.ok})
         return res.output, not res.ok
 
+    def _iphone(self, a: dict):
+        item = next((x for x in IPHONE_CATALOG if x["id"] == a.get("id")), None)
+        if item is None:
+            return "Нет такого действия на iPhone.", True
+        inp = (a.get("input") or "").replace("]", "").replace("|", " ").strip()
+        marker = f"[[ярлык:{item['shortcut']}|{item['label']}" + (f"|{inp}" if inp else "") + "]]"
+        return (f"Кнопка готова. Вставь в ответ дословно: {marker}\n"
+                "Если на iPhone ещё нет такой Команды — пусть создаст её по docs/shortcuts.md."), False
+
     def _family(self, person: str, a: dict):
         import re as _re
 
@@ -346,7 +369,8 @@ class ToolBox:
             if not self.domains:
                 return "Домен сервера не настроен (JARVIS_DOMAIN).", True
             token = create_token(self.m, pid, f"ссылка от {person}")
-            links = [f"https://{d}/app/#t={token}" for d in self.domains]
+            webapp = os.environ.get("JARVIS_WEBAPP_URL", "").rstrip("/")
+            links = ([f"{webapp}/#t={token}"] if webapp else []) + [f"https://{d}/app/#t={token}" for d in self.domains]
             out = f"Ссылка для {pid}: {links[0]}"
             if len(links) > 1:
                 out += f"\nЕсли из России не открывается — через ретранслятор: {links[1]}"

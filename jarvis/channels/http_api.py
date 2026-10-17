@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import logging
 import secrets
 import threading
@@ -28,6 +29,7 @@ from cogmem.types import Observation
 log = logging.getLogger(__name__)
 MAX_BODY = 25 * 1024 * 1024
 WEBAPP = Path(__file__).with_name("webapp")
+CORS_ORIGINS = [o.strip().rstrip("/") for o in os.environ.get("JARVIS_CORS_ORIGINS", "").split(",") if o.strip()]
 MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".json": "application/json",
         ".svg": "image/svg+xml"}
 
@@ -70,8 +72,25 @@ class Api:
                 self.send_response(code)
                 self.send_header("Content-Type", ctype)
                 self.send_header("Content-Length", str(len(body)))
+                self._cors()
                 self.end_headers()
                 self.wfile.write(body)
+
+            def _cors(self) -> None:
+                """Веб-приложение может быть на другом домене (Cloudflare Pages): разрешаем только свои адреса."""
+                origin = (self.headers.get("Origin") or "").rstrip("/")
+                if origin and origin in CORS_ORIGINS:
+                    self.send_header("Access-Control-Allow-Origin", origin)
+                    self.send_header("Vary", "Origin")
+                    self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Device")
+                    self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+                    self.send_header("Access-Control-Max-Age", "600")
+
+            def do_OPTIONS(self):  # noqa: N802 — предварительный запрос браузера
+                self.send_response(204)
+                self._cors()
+                self.send_header("Content-Length", "0")
+                self.end_headers()
 
             def _json(self, code: int, obj: dict) -> None:
                 self._send(code, json.dumps(obj, ensure_ascii=False).encode())
