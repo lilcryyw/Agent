@@ -30,6 +30,8 @@ class Link(private val ctx: Context, private val onLog: (String) -> Unit) {
     private fun capabilities(): JSONArray {
         val caps = JSONArray().put("ui_tree").put("input").put("speaker")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) caps.put("screen")
+        if (ctx.checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED) caps.put("microphone")
         return caps
     }
 
@@ -113,6 +115,15 @@ class Link(private val ctx: Context, private val onLog: (String) -> Unit) {
     fun sendEvent(text: String, trust: String = "observed") {
         ws?.takeIf { it.isOpen }?.send(JSONObject().apply {
             put("type", "event"); put("text", text); put("trust", trust)
+        }.toString())
+    }
+
+    /** Фраза с микрофона: сервер распознает, ответит, а ответ придёт обратно и прозвучит здесь. */
+    fun sendUtterance(wav: ByteArray) {
+        val sock = ws?.takeIf { it.isOpen } ?: run { onLog("нет связи — фраза не отправлена"); return }
+        sock.send(JSONObject().apply {
+            put("type", "utterance")
+            put("audio_b64", android.util.Base64.encodeToString(wav, android.util.Base64.NO_WRAP))
         }.toString())
     }
 

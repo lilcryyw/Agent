@@ -9,8 +9,9 @@ android {
         applicationId = "ai.jarvis.device"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1"
+        ndk { abiFilters += listOf("arm64-v8a") }  // современные телефоны; уменьшает APK
+        versionCode = 2
+        versionName = "0.2"
     }
     buildTypes {
         release { isMinifyEnabled = false }
@@ -25,5 +26,6 @@ dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("org.java-websocket:Java-WebSocket:1.5.7")
-    implementation("org.json:json:20240303")
+    implementation("com.alphacephei:vosk-android:0.3.47@aar")
+    implementation("net.java.dev.jna:jna:5.14.0@aar")
 }
