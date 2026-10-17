@@ -37,6 +37,7 @@ class Settings:
     use_fallbacks: bool = True       # резервная модель при отказе фильтров
     use_web_search: bool = True
     monthly_budget_usd: float = 40.0
+    turn_budget_usd: float = 1.0     # один ход дороже — остановиться и спросить
     session_max_tokens: int = 60000  # после — разговор начинается заново (с ядром и памятью)
     sleep_hour_local: int = 3
     owner_id: str = "owner"
@@ -65,6 +66,7 @@ class Settings:
         s.use_fallbacks = _bool("JARVIS_FALLBACKS", s.use_fallbacks)
         s.use_web_search = _bool("JARVIS_WEB_SEARCH", s.use_web_search)
         s.monthly_budget_usd = float(e.get("JARVIS_MONTHLY_BUDGET_USD", s.monthly_budget_usd))
+        s.turn_budget_usd = float(e.get("JARVIS_TURN_BUDGET_USD", s.turn_budget_usd))
         s.owner_id = e.get("JARVIS_OWNER_ID", s.owner_id)
         s.owner_name = e.get("JARVIS_OWNER_NAME", s.owner_name)
         s.owner_timezone = e.get("JARVIS_OWNER_TZ", s.owner_timezone)

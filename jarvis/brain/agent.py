@@ -209,6 +209,14 @@ class Brain:
                                       ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
             sess.messages.append({"role": "assistant", "content": resp.content})
             final_text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
+            if resp.stop_reason == "tool_use" and mem.spend_usd() - cost_before > self.s.turn_budget_usd:
+                # Защита от «увлёкся»: дальше без разрешения человека не тратим.
+                final_text = (f"Я потратил на эту задачу уже больше ${self.s.turn_budget_usd:.2f} и ещё не закончил. "
+                              "Продолжать?")
+                sess.messages.append({"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": b.id, "content": "Остановлено: лимит стоимости хода.",
+                     "is_error": True} for b in resp.content if getattr(b, "type", "") == "tool_use"]})
+                break
             if resp.stop_reason == "tool_use":
                 results = []
                 for b in resp.content:

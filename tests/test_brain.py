@@ -123,3 +123,14 @@ def test_internal_stimulus_can_stay_silent_and_cannot_grant_keys():
     assert r.silent and r.text == ""
     assert brain.tools.keys.active("owner") == []  # по своей инициативе ключ не выдать
     assert "<внутренний_повод>" in str(client.calls[0]["messages"][-1])
+
+
+def test_turn_budget_stops_runaway_loops():
+    brain, mem, clock, client = setup(lambda call: response(
+        [tool_block("recall", {"query": "что-то", "period": None, "include_outdated": False})], stop="tool_use",
+        inp=200_000))  # каждый шаг ≈ $0.8 на Opus
+    r = brain.handle("owner", "Найди всё обо всём")
+    assert "Продолжать?" in r.text and len(client.calls) == 2
+    # История осталась корректной: на каждый tool_use есть tool_result.
+    last = brain.sessions["owner"].messages[-1]
+    assert last["role"] == "user" and last["content"][0]["type"] == "tool_result"

@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable
 
 from pydantic import BaseModel, Field
@@ -39,6 +39,7 @@ class Initiative:
     llm: StructuredLLM | None
     brain_stimulus: Callable[[str, str], object]   # (person_id, повод) → TurnResult
     notify: Callable[[str, str], None]
+    _seen_until: dict[str, float] = field(default_factory=dict)  # события до этого момента уже рассмотрены
 
     def reasons(self, person_id: str) -> list[str]:
         """Ступень 1 — поводы без ИИ."""
@@ -47,10 +48,19 @@ class Initiative:
         out = [f"Цель [G{g.id}] «{g.title}»: пора вернуться (заметки: {g.notes[:200] or '—'})"
                for g in m.goals.due(person_id)]
         now = m.ctx.clock.now()
+        since = max(self._seen_until.get(person_id, 0.0), now - 3600)  # только новое с прошлой проверки
         for r in m.ctx.db.query(
             "SELECT text, ts FROM events WHERE person_id=? AND speaker='device' AND ts>? ORDER BY ts DESC LIMIT 5",
-            (person_id, now - 3600)):
+            (person_id, since)):
             out.append(f"Событие устройства {fmt_date(r['ts'], tz, True)}: {r['text']}")
+        self._seen_until[person_id] = now
+        if any(x.startswith("Событие устройства") for x in out):
+            # Новое событие может исполнить напоминание «по условию» («когда приду домой»).
+            for r in m.ctx.db.query(
+                "SELECT id, trigger_text, action_text FROM intentions WHERE person_id=? AND status='pending' "
+                "AND trigger_kind!='time' ORDER BY id LIMIT 10", (person_id,)):
+                out.append(f"Ждёт условия [I{r['id']}] «{r['trigger_text'] or '—'}»: {r['action_text']} "
+                           f"(если условие наступило — выполни и закрой через schedule cancel_ref)")
         return out
 
     def last_contact_hours(self, person_id: str) -> float:

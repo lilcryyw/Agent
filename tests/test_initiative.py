@@ -38,3 +38,14 @@ def test_quiet_hours_postpone_non_urgent():
     clock.set(datetime(2026, 3, 10, 23, 30, tzinfo=ZoneInfo("Europe/Paris")))
     mem.goals.add("owner", "Подобрать фильм", next_check=clock.now() - 60)
     assert ini.check("owner") is None and not stim
+
+
+def test_same_device_event_does_not_wake_twice():
+    from cogmem.types import Observation
+
+    ini, mem, clock, llm, stim, sent = make(WakeDecision(wake=True, urgent=False, focus="Мама написала"))
+    mem.observe(Observation("owner", "Уведомление: Мама — позвони мне", speaker="device", source_kind="external"))
+    clock.advance(minutes=1)
+    assert ini.check("owner") and len(llm.calls) == 1
+    clock.advance(minutes=20)
+    assert ini.check("owner") is None and len(llm.calls) == 1  # то же событие повторно не будит
