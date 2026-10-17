@@ -47,6 +47,11 @@ def main() -> None:
         restore(data, repo)
         backup = Backup(data, repo)
 
+    # Площадка сама сообщает свой адрес (Render) — подставляем, если домен не задан явно.
+    host = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
+    if host and not os.environ.get("JARVIS_DOMAIN"):
+        os.environ["JARVIS_DOMAIN"] = host
+        os.environ.setdefault("JARVIS_DEVICES_URL", f"wss://{host}/devices")
     j = Jarvis()
     if os.environ.get("JARVIS_OWNER_TOKEN"):
         from jarvis.channels.http_api import ensure_token
@@ -54,7 +59,9 @@ def main() -> None:
         ensure_token(j.memory, j.s.owner_id, os.environ["JARVIS_OWNER_TOKEN"])
     j.start_background()
     if os.environ.get("JARVIS_KEEP_AWAKE") == "1" and j.s.public_domain:
-        keep_awake(f"https://{j.s.public_domain}/api/health")
+        # Render усыпляет через 15 минут тишины, Hugging Face — через 48 часов.
+        keep_awake(f"https://{j.s.public_domain}/api/health",
+                   int(os.environ.get("JARVIS_KEEP_AWAKE_EVERY_S", "600")))
     if backup is not None:
         backup.start()
 

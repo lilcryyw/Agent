@@ -179,7 +179,7 @@ registerProcessor("mic", Mic);`;
 const call = { on: false, ws: null, ctx: null, stream: null, node: null, out: null, analyser: null,
                muted: false, state: "connecting", level: 0, retries: 0, wake: null,
                nextAt: 0, sources: [], playing: 0, done: 0, cancelled: new Set(), chain: Promise.resolve(),
-               heard: "", reply: "" };
+               heard: "", reply: "", speaking: 0 };
 const STATUS = { connecting: "Соединяю…", listening: "Слушаю", thinking: "Думаю…", speaking: "Говорю — можно перебить" };
 
 function setState(s) {
@@ -210,6 +210,7 @@ async function startCall() {
       echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
   } catch (e) { endCall("Нет доступа к микрофону: " + e.message); return; }
   try { if (navigator.audioSession) navigator.audioSession.type = "play-and-record"; } catch {}
+  try { speechSynthesis.speak(Object.assign(new SpeechSynthesisUtterance(" "), { volume: 0 })); } catch {}
   call.ctx = new (window.AudioContext || window.webkitAudioContext)();
   await call.ctx.resume();
   call.out = call.ctx.createGain(); call.analyser = call.ctx.createAnalyser(); call.analyser.fftSize = 512;
@@ -263,7 +264,11 @@ function onMsg(m) {
   else if (m.type === "error") { if (/ключ/.test(m.text)) needToken(); endCall(m.text); }
   else if (m.type === "state") setState(m.state);
   else if (m.type === "heard") { call.heard = m.text; call.reply = ""; caption(); add(m.text, "me"); }
-  else if (m.type === "say") { if (!call.cancelled.has(m.turn)) { call.reply = (call.reply + " " + m.text).trim(); caption(); } }
+  else if (m.type === "say") {
+    if (call.cancelled.has(m.turn)) return;
+    call.reply = (call.reply + " " + m.text).trim(); caption();
+    if (m.speak) speakLocal(m.turn, m.text);  // сервер без своего голоса — говорит телефон
+  }
   else if (m.type === "reply") { if (m.turn > 1 && m.text) add(m.text + (call.cancelled.has(m.turn) ? " (перебит)" : "")); }
   else if (m.type === "done") { call.done = m.turn; call.chain = call.chain.then(checkPlayed); }
   else if (m.type === "interrupt") { call.cancelled.add(m.turn); stopPlayback(); }
@@ -284,8 +289,23 @@ function onAudio(data) {
     s.onended = () => { call.sources = call.sources.filter((x) => x !== s); checkPlayed(); };
   });
 }
+// Голос телефона (когда сервер слабый и присылает только текст).
+let ruVoice = null;
+function pickVoice() {
+  const vs = speechSynthesis.getVoices();
+  ruVoice = vs.find((v) => /^ru/i.test(v.lang) && /milena|милена|google/i.test(v.name)) || vs.find((v) => /^ru/i.test(v.lang)) || null;
+}
+if ("speechSynthesis" in window) { pickVoice(); speechSynthesis.onvoiceschanged = pickVoice; }
+function speakLocal(turn, text) {
+  if (!("speechSynthesis" in window)) return;
+  const u = new SpeechSynthesisUtterance(text.replace(/https?:\/\/\S+/g, "ссылка на экране"));
+  u.lang = "ru-RU"; if (ruVoice) u.voice = ruVoice; u.rate = 1.05;
+  call.speaking++; call.playing = turn;
+  u.onend = u.onerror = () => { call.speaking = Math.max(0, call.speaking - 1); checkPlayed(); };
+  speechSynthesis.speak(u);
+}
 function checkPlayed() {
-  if (call.playing && !call.sources.length && call.done === call.playing && call.ws?.readyState === 1) {
+  if (call.playing && !call.sources.length && !call.speaking && call.done === call.playing && call.ws?.readyState === 1) {
     call.ws.send(JSON.stringify({ type: "played", turn: call.playing }));
     call.playing = 0;
   }
@@ -293,6 +313,7 @@ function checkPlayed() {
 function stopPlayback() {
   for (const s of call.sources) { try { s.onended = null; s.stop(); } catch {} }
   call.sources = []; call.nextAt = 0; call.playing = 0;
+  if (call.speaking) { call.speaking = 0; try { speechSynthesis.cancel(); } catch {} }
 }
 
 function animate() {

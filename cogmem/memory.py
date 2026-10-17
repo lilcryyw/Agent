@@ -381,16 +381,31 @@ class CognitiveMemory:
                                     (json.dumps(sorted(ids - ev_ids)), r["id"]))
 
     def recall_deep(self, person_id: str, query: str, *, period: str | None = None,
-                    include_outdated: bool = True) -> str:
-        """Глубокое вспоминание по всему архиву (инструмент для «сознания»)."""
-        tr = parse_time_range(period, self.ctx.clock.now(), self.person(person_id)["timezone"]) if period else None
-        big = Budgets(core=0, facts=1200, episodes=2400, procedures=300, intentions=300)
-        wm, _ = self.working_memory(person_id, query, deep=True, history=include_outdated, budgets=big,
-                                    time_range=tr)
-        return wm.render()
+                    include_outdated: bool = True, exclude_refs: set[str] | None = None,
+                    exclude_episode_id: int | None | str = "current") -> str:
+        """Глубокое вспоминание по всему архиву (инструмент для «сознания»).
 
-    def timeline(self, person_id: str, period: str) -> str:
-        """Что было в период: сводки и эпизоды по времени (инструмент для «сознания»)."""
+        exclude_episode_id — какой разговор не искать: по умолчанию текущий («current» — он и так в
+        контексте; иначе инструмент возвращал весь нынешний разговор, вплоть до самого вопроса).
+        None — не исключать ничего. exclude_refs — уже показанное в этом разговоре: не повторяем
+        целиком, а перечисляем одной строкой (оно относится к делу и уже есть в истории).
+        """
+        tr = parse_time_range(period, self.ctx.clock.now(), self.person(person_id)["timezone"]) if period else None
+        if exclude_episode_id == "current":
+            exclude_episode_id = self.current_episode_id(person_id)
+        big = Budgets(core=0, facts=1200, episodes=2400, procedures=300, intentions=300)
+        skip = set(exclude_refs or ())
+        wm, res = self.working_memory(person_id, query, deep=True, history=include_outdated, budgets=big,
+                                      time_range=tr, exclude_episode_id=exclude_episode_id, exclude_refs=skip)
+        again = ", ".join(dict.fromkeys(r.ref for r in res.items[:20] if r.ref in skip))
+        if wm.is_empty() and again:
+            return f"Нового не нашлось; относящееся к делу уже показано выше в разговоре: {again}"
+        out = wm.render()
+        return out + (f"\nТакже относится (уже показано выше в разговоре): {again}" if again else "")
+
+    def timeline(self, person_id: str, period: str, *, exclude_refs: set[str] | None = None) -> str:
+        """Что было в период: сводки и эпизоды по времени (инструмент для «сознания»).
+        Открытый (текущий) разговор не входит; уже показанное (exclude_refs) — одной строкой ссылок."""
         p = self.person(person_id)
         tr = parse_time_range(period, self.ctx.clock.now(), p["timezone"])
         if tr is None:
@@ -402,11 +417,21 @@ class CognitiveMemory:
             (person_id, tr.end, tr.start))
         if not rows:
             return f"За период «{tr.label}» воспоминаний нет."
+        skip = set(exclude_refs or ())
         lines = [f"Период: {tr.label}"]
-        for r in rows[:40]:
+        again: list[str] = []
+        for r in rows:
+            rf = ref("episode", r["id"])
+            if rf in skip:
+                again.append(rf)
+                continue
+            if len(lines) > 40:
+                break
             lvl = "" if r["level"] == "episode" else f"[{r['level']}] "
-            lines.append(f"- [{ref('episode', r['id'])}] {fmt_date(r['start_ts'], p['timezone'], True)} {lvl}"
+            lines.append(f"- [{rf}] {fmt_date(r['start_ts'], p['timezone'], True)} {lvl}"
                          f"«{r['title']}»" + (f": {r['gist']}" if r["gist"] else ""))
+        if again:
+            lines.append("Уже показано выше в разговоре: " + ", ".join(again[:40]))
         return "\n".join(lines)
 
     def explain(self, person_id: str, unit_ref: str) -> str:

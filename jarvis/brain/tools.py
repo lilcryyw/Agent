@@ -143,7 +143,8 @@ TOOLS: list[dict] = [
      "input_schema": _schema({"op": {"type": "string", "enum": ["list", "status", "cancel"]}, "ref": SN})},
     {"name": "key_grant",
      "description": "Выдать ключ от замка — ТОЛЬКО когда человек сам ясно разрешил в своей реплике (делай это первым "
-                    "шагом хода, до поиска и кода). scope: money | message | delete | relative_device. "
+                    "шагом хода, до поиска и кода). scope: money | message | delete | relative_device. target — "
+                    "кому/чему (для людей — их id из семьи, например mama). "
                     "duration: once | today | week | forever.",
      "input_schema": _schema({"scope": {"type": "string", "enum": sorted(SCOPES)}, "target": SN, "limit_eur": NN,
                               "duration": {"type": "string", "enum": ["once", "today", "week", "forever"]}})},
@@ -154,8 +155,10 @@ TOOLS: list[dict] = [
     {"name": "note",
      "description": "Работа с памятью явно. op: remember — сохранить сразу (text, about=о ком, не указан — о "
                     "собеседнике); correct — исправить факт ref на text; forget — удалить навсегда ref (только по "
-                    "желанию человека); explain — откуда известно ref. text — пустая строка, если не нужен.",
-     "input_schema": _schema({"op": {"type": "string", "enum": ["remember", "correct", "forget", "explain"]},
+                    "желанию человека); explain — откуда известно ref; approve / reject — подтвердить или отклонить факт ref, "
+                    "который ждёт проверки (только по ясному ответу человека). text — пустая строка, если не нужен.",
+     "input_schema": _schema({"op": {"type": "string", "enum": ["remember", "correct", "forget", "explain",
+                                                                 "approve", "reject"]},
                               "text": S, "share_with_family": B, "ref": SN, "about": SN})},
     {"name": "recall",
      "description": "Вспомнить глубже, чем в блоке <память>. query — как человек мог об этом рассказывать (другими "
@@ -251,6 +254,7 @@ class ToolBox:
                  devices: DeviceHub, vault: Vault, pairing: Any = None, devices_url: str = "",
                  domains: list[str] | None = None):
         self.m = memory
+        self.shown: dict[str, set[str]] = {}  # person → ссылки, уже показанные в текущей сессии (ставит Brain)
         self.pairing = pairing          # (owner, kind) → код; None — шлюз устройств не запущен
         self.devices_url = devices_url  # wss://сервер/devices[,wss://ретранслятор/devices]
         self.domains = domains or []    # [основной домен, ретранслятор]
@@ -372,10 +376,11 @@ class ToolBox:
         tz = m.person(person)["timezone"]
 
         if name == "recall":
+            shown = self.shown.get(person) or set()  # уже показанное в этом разговоре — не повторяем
             if not a.get("query") and a.get("period"):
-                return m.timeline(person, a["period"]), False
+                return m.timeline(person, a["period"], exclude_refs=shown), False
             return m.recall_deep(person, a.get("query") or a.get("period") or "", period=a.get("period"),
-                                 include_outdated=bool(a.get("include_outdated"))), False
+                                 include_outdated=bool(a.get("include_outdated")), exclude_refs=shown), False
 
         if name == "note":
             op, ref_, text = a["op"], a.get("ref"), a.get("text")
@@ -396,6 +401,13 @@ class ToolBox:
                             "текст или голос не узнан). Переспроси."), True
                 ok = m.forget(person, ref_ or "")
                 return ("Удалено навсегда." if ok else "Не удалось (нет такого или это не твоё)."), not ok
+            if op in ("approve", "reject"):
+                st = self._state(person, origin)
+                if origin != "user" or st.tainted or st.unverified:
+                    return "Подтверждать факты можно только по ясному ответу самого человека в его реплике.", True
+                ok = m.review_fact(person, ref_ or "", approve=op == "approve")
+                return (("Подтверждено." if op == "approve" else "Отклонено.") if ok
+                        else "Нет такого факта на проверке."), not ok
             return m.explain(person, ref_ or ""), False
 
         if name == "schedule":
@@ -948,7 +960,7 @@ class ToolBox:
         # send
         to = self._person_id(a.get("person") or "") or person
         if to != person:
-            keys, err = self._unlock(person, {"message"}, self._target_of(to), None, origin)
+            keys, err = self._unlock_person(person, to, origin)
             if err:
                 return err, True
             for k in keys:
@@ -1008,9 +1020,17 @@ class ToolBox:
         r = self.m.ctx.db.one("SELECT id FROM persons WHERE lower(name)=lower(?)", (w,))
         return r["id"] if r else None
 
-    def _target_of(self, pid: str) -> str:
-        p = self.m.person(pid) or {}
-        return f"{pid} {p.get('name', '')}".strip().lower()
+    def _unlock_person(self, person: str, to: str, origin: str) -> tuple[list, str | None]:
+        """Сообщение другому человеку: подходит ключ «message» на его id или имя."""
+        p = self.m.person(to) or {}
+        err = None
+        for t in (to, (p.get("name") or "").lower()):
+            if not t:
+                continue
+            keys, err = self._unlock(person, {"message"}, t, None, origin)
+            if not err:
+                return keys, None
+        return [], err
 
     def _tell(self, person: str, a: dict, origin: str) -> tuple[str, bool]:
         text = (a.get("text") or "").strip()
@@ -1030,7 +1050,7 @@ class ToolBox:
             if not who:
                 to = dev.owner  # «скажи на кухонном ПК» — слышит тот, чьё это устройство
         if to != person:
-            keys, err = self._unlock(person, {"message"}, self._target_of(to), None, origin)
+            keys, err = self._unlock_person(person, to, origin)
             if err:
                 return err, True
             for k in keys:

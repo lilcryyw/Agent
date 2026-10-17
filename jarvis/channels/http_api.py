@@ -157,12 +157,12 @@ class Api:
                             return self._json(200, {"heard": "", "reply": "Не расслышал, повтори, пожалуйста."})
                         reply = api._stop(person, heard) or \
                             api.j.brain.handle(person, heard, channel="voice", device=device).text
-                        if parse_qs(u.query).get("reply") == ["audio"]:
+                        if parse_qs(u.query).get("reply") == ["audio"] and getattr(api.voice, "can_speak", True):
                             audio, mime = api.voice.speak(reply, "mp3")
                             return self._send(200, audio, mime)
                         return self._json(200, {"heard": heard, "reply": reply})
                     if u.path == "/api/speak":
-                        if api.voice is None:
+                        if api.voice is None or not getattr(api.voice, "can_speak", True):
                             return self._json(501, {"error": "голос не настроен на сервере"})
                         text = json.loads(body or b"{}").get("text", "").strip()[:2000]
                         audio, mime = api.voice.speak(text or "…", "mp3")

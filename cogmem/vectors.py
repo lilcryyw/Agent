@@ -140,7 +140,9 @@ class VectorIndex:
 
     def get_many(self, unit_type: str, unit_ids: list[int]) -> tuple[list[int], np.ndarray]:
         """Векторы набора записей одной матрицей: (какие нашлись, матрица [m, dim])."""
-        t = self._t[unit_type]
+        t = self._t.get(unit_type)
+        if t is None:
+            return [], np.zeros((0, self.dim), dtype=np.float32)
         found = [(u, t.pos[u]) for u in unit_ids if u in t.pos]
         if not found:
             return [], np.zeros((0, self.dim), dtype=np.float32)
@@ -148,8 +150,9 @@ class VectorIndex:
 
     def search(self, unit_type: str, query: np.ndarray, viewer: str, *, k: int = 40,
                include_inactive: bool = False, ts_range: tuple[float, float] | None = None,
-               ) -> list[tuple[int, float]]:
-        """Топ-k (id, косинус) среди видимых viewer записей."""
+               stats: dict | None = None) -> list[tuple[int, float]]:
+        """Топ-k (id, косинус) среди видимых viewer записей.
+        stats — если передан словарь, в него кладутся mu/sd/n косинусов по всем видимым записям."""
         with self._lock:
             t = self._t[unit_type]
             n = t.n
@@ -164,7 +167,11 @@ class VectorIndex:
             m = int(mask.sum())
             if not m:
                 return []
-            sims = np.where(mask, t.mat[:n] @ query.astype(np.float32), -np.inf)
+            raw = t.mat[:n] @ query.astype(np.float32)
+            if stats is not None:
+                vis = raw[mask]
+                stats.update(mu=float(vis.mean()), sd=float(vis.std()), n=int(vis.size))
+            sims = np.where(mask, raw, -np.inf)
             k = min(k, m)
             top = np.argpartition(-sims, k - 1)[:k]
             top = top[np.argsort(-sims[top])]

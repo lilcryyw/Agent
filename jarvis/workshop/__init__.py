@@ -122,7 +122,13 @@ def _landlock_plan(hide: list[Path], writable: list[Path], readable: list[Path])
         for c in children:
             if c in blocked:
                 continue
-            rules.append((str(c), _LL_READ if c.is_dir() else _LL_READ & _LL_FILE))
+            try:
+                r = c.resolve()  # ссылка (pytest-current, /var → /private/var…) может вести внутрь спрятанного
+            except OSError:
+                continue
+            if r in blocked or any(h in r.parents for h in hide):
+                continue
+            rules.append((str(r), _LL_READ if r.is_dir() else _LL_READ & _LL_FILE))
     rules += [(str(p.resolve()), _LL_READ) for p in readable if p.exists()]
     rules += [(str(p.resolve()), _LL_ALL) for p in writable if p.exists()]
     for extra in ("/dev", "/tmp", "/dev/shm"):

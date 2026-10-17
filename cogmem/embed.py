@@ -23,6 +23,9 @@ class Embedder(Protocol):
     # У разных моделей шкалы очень разные (MiniLM: 0.05…0.8, e5-large: 0.72…0.92).
     sim_floor: float
     sim_ceil: float
+    # Шкала «запись↔запись» (для отсева похожего в рабочей памяти) — у моделей она выше, чем «запрос↔запись».
+    dup_floor: float
+    dup_ceil: float
 
     def embed(self, texts: Sequence[str], *, query: bool = False) -> np.ndarray:
         """Матрица [n, dim], строки нормированы (длина 1). query=True — это поисковый запрос."""
@@ -43,6 +46,8 @@ class HashEmbedder:
 
     sim_floor = 0.0
     sim_ceil = 0.6
+    dup_floor = 0.0
+    dup_ceil = 0.6
 
     def __init__(self, dim: int = 512):
         self.dim = dim
@@ -66,9 +71,11 @@ class HashEmbedder:
         return _normalize(np.stack([self._vec(t) for t in texts]))
 
 
-# Модель → (префикс запроса, префикс текста, floor, ceil). Калибровка снята на русских парах.
+# Модель → (префикс запроса, префикс текста, floor, ceil[, dup_floor, dup_ceil]). Калибровка — на русских парах.
+# e5-large «запрос↔запись»: постороннее 0.73–0.80, верное 0.80–0.85 (стенд, 2026-10) — поэтому floor 0.77.
+# e5-large «запись↔запись»: постороннее 0.84–0.89, близкое по теме ~0.91, перефразировка 0.97–1.0.
 MODELS = {
-    "intfloat/multilingual-e5-large": ("query: ", "passage: ", 0.74, 0.90),
+    "intfloat/multilingual-e5-large": ("query: ", "passage: ", 0.75, 0.90, 0.88, 0.98),
     "sentence-transformers/paraphrase-multilingual-mpnet-base-v2": ("", "", 0.10, 0.80),
     "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2": ("", "", 0.05, 0.80),
 }
@@ -89,7 +96,9 @@ class FastEmbedder:
         self._model = TextEmbedding(model_name)
         self._lock = threading.Lock()
         self.name = model_name
-        self._qp, self._pp, self.sim_floor, self.sim_ceil = MODELS.get(model_name, ("", "", 0.05, 0.8))
+        cal = MODELS.get(model_name, ("", "", 0.05, 0.8))
+        self._qp, self._pp, self.sim_floor, self.sim_ceil = cal[:4]
+        self.dup_floor, self.dup_ceil = cal[4:6] if len(cal) >= 6 else (self.sim_floor, self.sim_ceil)
         self.dim = int(self.embed(["проверка"]).shape[1])
 
     def embed(self, texts: Sequence[str], *, query: bool = False) -> np.ndarray:

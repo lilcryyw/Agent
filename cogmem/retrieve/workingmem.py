@@ -71,12 +71,45 @@ class WorkingMemory:
         return "\n".join(parts)
 
 
+_MARKS = (" [часть сведений отсюда", " [возможно, устарело", " [внешний текст")
+
+
+def _strip_marks(s: str) -> str:
+    for mk in _MARKS:
+        s = s.split(mk, 1)[0]
+    return s
+
+
 def _textkey(r: Recalled) -> str:
-    """Ключ для отсева дословных повторов («Какая погода?» десять раз — одно воспоминание)."""
+    """Ключ для отсева дословных повторов («Какая погода?» десять раз — одно воспоминание).
+
+    Реплика — по тексту в «»; эпизод — по заголовку И сути (у разных разговоров заголовок
+    «Звонок маме» бывает одинаковым — раньше оставался только один из них); факт — по
+    утверждению без служебного хвоста «(со слов, записано …)» — иначе дубли с разными датами
+    не узнавались.
+    """
     from cogmem.text.ru import stems
 
-    body = r.text.split("«", 1)[-1] if "«" in r.text else r.text
-    return " ".join(stems(body.split("»", 1)[0]))
+    text = _strip_marks(r.text)
+    if r.unit_type == "fact":
+        body = text.rsplit(" (", 1)[0]
+    elif r.unit_type == "episode" and "«" in text:
+        body = text.split("«", 1)[1]
+    elif "«" in text:
+        body = text.split("«", 1)[1].rsplit("»", 1)[0]
+    else:
+        body = text
+    return " ".join(stems(body))
+
+
+def _title_key(ep: Recalled) -> str:
+    from cogmem.text.ru import stems
+
+    meta = ep.extra.get("meta") or {}
+    title = meta.get("title")
+    if title is None and "«" in ep.text:
+        title = ep.text.split("«", 1)[1].split("»", 1)[0]
+    return " ".join(stems(title or ""))
 
 
 def _dedupe(items: list[Recalled]) -> list[Recalled]:
@@ -91,29 +124,51 @@ def _dedupe(items: list[Recalled]) -> list[Recalled]:
     return out
 
 
+def _dup01(ctx: Ctx, cos: np.ndarray) -> np.ndarray:
+    """Похожесть двух ЗАПИСЕЙ → 0..1. Шкала «запись↔запись» у моделей своя: у e5 даже несвязанные
+    записи близки (~0.83), и калибровка «запрос↔запись» давала почти одинаковый штраф всем подряд."""
+    e = ctx.embedder
+    lo = getattr(e, "dup_floor", e.sim_floor)
+    hi = getattr(e, "dup_ceil", e.sim_ceil)
+    return np.clip((cos - lo) / ((hi - lo) or 1.0), 0.0, 1.0)
+
+
 def _mmr(items: list[Recalled], ctx: Ctx, lam: float, limit: int) -> list[Recalled]:
-    """Maximal Marginal Relevance: жадно берём по баллу, штрафуя похожесть на уже выбранное."""
-    pool = _dedupe(list(items))
+    """Maximal Marginal Relevance: жадно берём по баллу, штрафуя похожесть на уже выбранное.
+
+    Дословные повторы уже отсеяны по тексту; здесь только штраф, не запрет:
+    «живёт в Самаре» и «переехала в Тольятти» похожи, но оба нужны.
+    """
+    pool = _dedupe(list(items))[: limit + 60]
+    if not pool or limit <= 0:
+        return []
+    n = len(pool)
+    dim = ctx.index.dim
+    V = np.zeros((n, dim), dtype=np.float32)
+    has = np.zeros(n, dtype=bool)
+    by_type: dict[str, list[int]] = {}
+    for i, it in enumerate(pool):
+        by_type.setdefault(it.unit_type, []).append(i)
+    for t, idxs in by_type.items():
+        pos = {pool[i].unit_id: i for i in idxs}
+        found, mat = ctx.index.get_many(t, [pool[i].unit_id for i in idxs])
+        for uid, row in zip(found, mat):
+            V[pos[uid]] = row
+            has[pos[uid]] = True
+    scores = np.array([it.score for it in pool], dtype=np.float64)
+    maxsim = np.full(n, -np.inf)
+    taken = np.zeros(n, dtype=bool)
     chosen: list[Recalled] = []
-    vecs: list[np.ndarray] = []
-    while pool and len(chosen) < limit:
-        best_i, best_val = 0, -1e9
-        for i, it in enumerate(pool[:60]):
-            v = ctx.index.get(it.unit_type, it.unit_id)
-            # Похожесть на уже выбранное — по калибровке модели (шкалы у моделей разные).
-            # Дословные повторы уже отсеяны по тексту; здесь только штраф, не запрет:
-            # «живёт в Самаре» и «переехала в Тольятти» похожи, но оба нужны.
-            red = ctx.sim01(max((float(v @ u) for u in vecs), default=-1.0)) if v is not None else 0.0
-            val = lam * it.score - (1 - lam) * red
-            if val > best_val:
-                best_i, best_val = i, val
-        if best_val == -1e9:
+    while len(chosen) < min(limit, n):
+        red = np.where(has & np.isfinite(maxsim), _dup01(ctx, np.where(np.isfinite(maxsim), maxsim, 0.0)), 0.0)
+        val = np.where(taken, -np.inf, lam * scores - (1 - lam) * red)
+        i = int(np.argmax(val))
+        if not np.isfinite(val[i]):
             break
-        it = pool.pop(best_i)
-        chosen.append(it)
-        v = ctx.index.get(it.unit_type, it.unit_id)
-        if v is not None:
-            vecs.append(v)
+        taken[i] = True
+        chosen.append(pool[i])
+        if has[i]:
+            maxsim = np.maximum(maxsim, V @ V[i])
     return chosen
 
 
@@ -152,8 +207,11 @@ def pack(ctx: Ctx, result: RecallResult, viewer: str, *, budgets: Budgets | None
     groups: list[tuple[float, Recalled | None, list[Recalled]]] = []
     used_eps: set[int] = set()
     for ep in _mmr(eps, ctx, lam, 20):
-        quotes = sorted(by_ep.get(ep.unit_id, []), key=lambda q: -q.score)[:2]
-        top = max([ep.score] + [q.score for q in quotes])
+        # Цитата, повторяющая строку эпизода (заголовок незакодированного эпизода = первая реплика), — лишняя.
+        tk = _title_key(ep)
+        quotes = sorted((q for q in by_ep.get(ep.unit_id, []) if not tk or _textkey(q) != tk),
+                        key=lambda q: -q.score)[:2]
+        top = max([ep.score] + [q.score for q in by_ep.get(ep.unit_id, [])])  # и выброшенная цитата тянет вверх
         groups.append((top, ep, quotes))
         used_eps.add(ep.unit_id)
     loose = [ev for ev in _mmr(evs, ctx, lam, 30) if (ev.episode_id or -1) not in used_eps]

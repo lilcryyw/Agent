@@ -12,7 +12,8 @@ from collections import defaultdict
 
 from cogmem.context import Ctx
 
-TRACE_WEIGHT = {"created": 1.0, "used": 1.0, "retrieved": 0.3}
+# Показанное, но не использованное почти не подкрепляет память (иначе шум, показанный раз, возвращается всегда).
+TRACE_WEIGHT = {"created": 1.0, "used": 1.0, "retrieved": 0.05}
 
 
 def base_levels(ctx: Ctx, units: list[tuple[str, int]]) -> dict[tuple[str, int], float]:

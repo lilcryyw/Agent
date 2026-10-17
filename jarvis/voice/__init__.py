@@ -19,6 +19,11 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 STT_MODEL = os.environ.get("JARVIS_STT_MODEL", "gigaam-v3-e2e-ctc")  # с пунктуацией и цифрами
+# local — GigaAM на сервере (лучше для русского, ~1 ГБ памяти); cloudflare — Whisper в Workers AI (без памяти).
+STT_BACKEND = os.environ.get("JARVIS_STT", "local")
+# piper — голос Джарвиса синтезирует сервер; client — сервер присылает текст, а говорит сам телефон/браузер
+# (для слабых бесплатных серверов, где синтез идёт медленнее речи).
+TTS_BACKEND = os.environ.get("JARVIS_TTS", "piper")
 TTS_VOICE = os.environ.get("JARVIS_TTS_VOICE", "ru_RU-dmitri-medium")  # ещё: ru_RU-irina-medium, -denis-, -ruslan-
 PIPER_BASE = "https://huggingface.co/rhasspy/piper-voices/resolve/main"
 
@@ -60,6 +65,8 @@ class Voice:
         """Любой аудиоформат → текст."""
         # ffmpeg в поток пишет WAV без длины — берём «сырой» звук и собираем WAV сами.
         pcm = pcm if pcm is not None else self.pcm16k(audio)
+        if STT_BACKEND == "cloudflare":
+            return self._transcribe_cloudflare(pcm)
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
             with wave.open(f, "wb") as w:
                 w.setnchannels(1)
@@ -72,6 +79,29 @@ class Voice:
         finally:
             os.unlink(f.name)
         return (text or "").strip()
+
+    @staticmethod
+    def _transcribe_cloudflare(pcm: bytes) -> str:
+        """Распознавание в Cloudflare Workers AI (Whisper) — для серверов, где модель GigaAM не помещается."""
+        import base64
+        import json
+
+        if len(pcm) < 16000:  # меньше полсекунды — нечего распознавать
+            return ""
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(16000)
+            w.writeframes(pcm)
+        url = (f"https://api.cloudflare.com/client/v4/accounts/{os.environ['CLOUDFLARE_ACCOUNT_ID']}"
+               "/ai/run/@cf/openai/whisper-large-v3-turbo")
+        body = json.dumps({"audio": base64.b64encode(buf.getvalue()).decode(), "language": "ru"}).encode()
+        req = urllib.request.Request(url, data=body, method="POST", headers={
+            "Authorization": f"Bearer {os.environ['CLOUDFLARE_API_TOKEN']}", "Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            data = json.loads(r.read())
+        return ((data.get("result") or {}).get("text") or "").strip()
 
     # --- синтез ---
     def _tts_voice(self):
@@ -90,7 +120,13 @@ class Voice:
             self._tts = PiperVoice.load(str(path))
         return self._tts
 
+    @property
+    def can_speak(self) -> bool:
+        return TTS_BACKEND != "client"
+
     def speak_wav(self, text: str) -> bytes:
+        if not self.can_speak:
+            raise RuntimeError("синтез речи на сервере выключен (JARVIS_TTS=client)")
         buf = io.BytesIO()
         with self._tts_lock, wave.open(buf, "wb") as w:
             self._tts_voice().synthesize_wav(text, w)

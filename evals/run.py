@@ -63,6 +63,10 @@ def offline(use_hash: bool, verbose: bool, model: str | None = None) -> dict:
         from cogmem.embed import HashEmbedder
 
         emb = HashEmbedder()
+    elif model and model.startswith("@cf/"):  # облегчённый режим: смысл в Cloudflare Workers AI
+        from cogmem.embed_remote import CloudflareEmbedder
+
+        emb = CloudflareEmbedder(model)
     else:
         from cogmem.embed import FastEmbedder
 

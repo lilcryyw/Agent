@@ -140,7 +140,8 @@ class CallServer:
             make_segmenter(self.models_dir)
             if self.voice is not None and hasattr(self.voice, "speak_wav"):
                 self.voice.transcribe(b"", pcm=b"\0\0" * (RATE // 2))
-                self.voice.speak_wav("Готов.")
+                if getattr(self.voice, "can_speak", True):
+                    self.voice.speak_wav("Готов.")
         except Exception:  # noqa: BLE001
             log.exception("прогрев моделей речи не удался")
 
@@ -211,6 +212,15 @@ class Call:
 
     async def _say(self, turn: int, text: str) -> bool:
         """Синтез и отправка одного предложения; False — ход отменён или звука нет (текст всё равно уходит)."""
+        if not getattr(self.voice, "can_speak", True):
+            # Слабый сервер: произносит сам браузер (speak=true), сервер шлёт только текст.
+            if turn in self.cancelled:
+                return False
+            self.playing = turn
+            await self.state("speaking")
+            await self.send({"type": "say", "turn": turn, "text": text, "speak": True})
+            self.spoken.append(text)
+            return True
         try:
             audio, _ = await self.loop.run_in_executor(None, self.voice.speak, speakable(text), "mp3")
         except Exception:  # noqa: BLE001 — голос сломался: хотя бы текстом

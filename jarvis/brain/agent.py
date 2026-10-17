@@ -159,11 +159,13 @@ class Brain:
 
     def cancel(self, person_id: str) -> bool:
         """«Джарвис, стоп»: прервать текущий ход человека (генерацию и долгие инструменты). True — было что прерывать."""
+        stopped = 0
+        if hasattr(self.tools, "cancel_all"):
+            stopped = self.tools.cancel_all(person_id) or 0  # фоновые задачи тоже
         ev = self._cancels.get(person_id)
-        if ev is None:
-            return False
-        ev.set()
-        return True
+        if ev is not None:
+            ev.set()
+        return ev is not None or bool(stopped)
 
     def busy(self, person_id: str) -> bool:
         return self._lock(person_id).locked()
@@ -231,7 +233,6 @@ class Brain:
                 recent_from = [obs.closed_episode_id, obs.episode_id]
             sess = Session(person_id, obs.episode_id, effort=effort or self.s.brain_effort)
             self.sessions[person_id] = sess
-        restarted_mid_episode = obs.episode_id in recent_from
 
         if self._over_budget():
             if origin != "user":
@@ -243,17 +244,19 @@ class Brain:
             mem.observe(Observation(person_id, msg, speaker="assistant", channel=channel, device=device))
             return TurnResult(msg, [], [], [], 0.0, {}, new_session, over_budget=True)
 
-        # Рабочая память под эту реплику (текущий разговор и так в истории — его не ищем).
+        # Профиль собеседника — в начале сессии; его факты не дублируем в <память>.
+        profile = mem.core_profile(person_id) if new_session else ""
+        core_refs = REF_RE.findall(profile)
+        # Рабочая память под эту реплику. Текущий разговор и так в истории (или в <недавний_разговор>) —
+        # его не ищем, иначе свежая реплика человека вернётся к нему же как «воспоминание».
         ctx = {"channel": channel, "device": device}
-        wm, res = mem.working_memory(person_id, text, context=ctx,
-                                     exclude_episode_id=None if restarted_mid_episode else obs.episode_id,
-                                     exclude_refs=sess.shown)
-        shown_now = wm.shown_refs() + [r for r in REF_RE.findall("\n".join(wm.intentions + wm.procedures))]
+        wm, res = mem.working_memory(person_id, text, context=ctx, exclude_episode_id=obs.episode_id,
+                                     exclude_refs=sess.shown | set(core_refs))
+        shown_now = core_refs + wm.shown_refs() + REF_RE.findall("\n".join(wm.intentions + wm.procedures))
         now = mem.local_now(person_id)
         blocks: list[dict] = []
         if new_session:
-            blocks.append({"type": "text", "text": f"<о_собеседнике>\n{mem.core_profile(person_id)}\n</о_собеседнике>"})
-            shown_now += REF_RE.findall(mem.core.get(person_id))
+            blocks.append({"type": "text", "text": f"<о_собеседнике>\n{profile}\n</о_собеседнике>"})
             lines = self._recent_lines(recent_from, obs.event_id) if recent_from else []
             if lines:
                 blocks.append({"type": "text", "text": "<недавний_разговор>\n" + "\n".join(lines)
@@ -267,6 +270,10 @@ class Brain:
             extra_lines = self.tools.context_lines(person_id)
             if extra_lines:
                 state += " " + " ".join(extra_lines)
+        if origin == "user" and hasattr(mem, "pending_facts"):
+            pending = mem.pending_facts(person_id, limit=3)
+            if pending:  # то, что пришло из сомнительного источника, — спросить при случае, не навязываясь
+                state += " Ждут подтверждения человека (note approve/reject): " + "; ".join(pending) + "."
         if note:
             state += f" {note}"
         blocks.append({"type": "text", "text": f"<контекст>Сейчас: {human_now(now)} ({now.tzinfo}). {where} {state}"
@@ -277,6 +284,8 @@ class Brain:
         user_msg = {"role": "user", "content": blocks}
         sess.messages.append(user_msg)
         sess.shown.update(shown_now)
+        if isinstance(getattr(self.tools, "shown", None), dict):
+            self.tools.shown[person_id] = sess.shown  # тот же набор: инструмент видит актуальное
         if hasattr(self.tools, "begin_turn"):
             self.tools.begin_turn(person_id, origin=origin, unverified_speaker=bool(note and "не узнан" in note),
                                   cancel=cancel)
@@ -336,6 +345,9 @@ class Brain:
                                       ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
             content = list(resp.content or [])
             stop = resp.stop_reason
+            if hasattr(self.tools, "observe_response"):
+                # Серверные инструменты (поиск, чтение сайтов) приносят чужой текст — отмечаем это для замка.
+                self.tools.observe_response(person_id, content)
             if stop == "refusal":
                 # Отказ: его содержимое не оставляем в истории (иначе сломаются следующие ходы).
                 final_text = "Извини, с этим я помочь не могу."
@@ -383,6 +395,8 @@ class Brain:
                     tool_calls.append(b.name)
                     out, is_err = self.tools.run(person_id, b.name, dict(b.input), origin=origin,
                                                  source_event_id=obs.event_id if origin == "user" else None)
+                    # Показанное инструментом уже в истории — в <память> не повторяем. (Сервер вычищает старые
+                    # результаты только после ~100k токенов, а сессия перезапускается раньше — на session_max_tokens.)
                     refs = REF_RE.findall(out) if isinstance(out, str) else []
                     sess.shown.update(refs)
                     shown_now += refs
@@ -398,7 +412,8 @@ class Brain:
             close_with(final_text)
 
         clean, used = split_used(final_text)
-        mem.feedback(shown_now, used)
+        # «Использовал» засчитываем и за показанное в прошлых репликах этой сессии.
+        mem.feedback(list(dict.fromkeys(shown_now + [u for u in used if u in sess.shown])), used)
         silent = origin == "internal" and (not clean or SILENCE in clean)
         if silent:
             return TurnResult("", used, shown_now, tool_calls, turn_cost, total, new_session, True)

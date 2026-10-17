@@ -105,15 +105,17 @@ class Retriever:
         qv = self.ctx.embed1(cue, query=True)
 
         cos: dict[tuple[str, int], float] = {}
+        zst: dict[str, dict] = {}  # распределение косинусов запроса по всей таблице (для z-нормировки)
         for t in ("fact", "episode", "event", "entity"):
             ts_range = None
             if time_range is not None and t in ("episode", "event"):
                 ts_range = (time_range.start, time_range.end)
+            zst[t] = {}
             for uid, s in self.ctx.index.search(t, qv, viewer, k=k, include_inactive=history and t == "fact",
-                                                ts_range=ts_range):
+                                                ts_range=ts_range, stats=zst[t] if ts_range is None else None):
                 cos[(t, uid)] = s
             if ts_range is not None:  # и без фильтра — вдруг дата названа неточно
-                for uid, s in self.ctx.index.search(t, qv, viewer, k=k // 2):
+                for uid, s in self.ctx.index.search(t, qv, viewer, k=k // 2, stats=zst[t]):
                     cos.setdefault((t, uid), s)
 
         bm: dict[tuple[str, int], float] = {}
@@ -151,6 +153,36 @@ class Retriever:
                 continue
             ok[key] = m
 
+        # Эпизоды, из которых выведены факты, позже заменённые новыми: помечаем «устарело частично».
+        ep_ids = [k_[1] for k_ in ok if k_[0] == "episode"] + [m["episode_id"] for k_, m in ok.items()
+                                                               if k_[0] == "event" and m.get("episode_id")]
+        stale_eps: set[int] = set()
+        rescue: dict[tuple[str, int], set[int]] = {}  # актуальный факт → чьё устаревание он «закрывает»
+        if ep_ids:
+            ph = ",".join("?" * len(ep_ids))
+            stale_rows = self.ctx.db.query(
+                f"SELECT id, source_episode_id, superseded_by FROM facts WHERE invalidated_at IS NOT NULL "
+                f"AND (visibility='family' OR owner_person=?) AND source_episode_id IN ({ph})", (viewer, *ep_ids))
+            stale_eps = {r["source_episode_id"] for r in stale_rows}
+            # Старое показываем — покажем и то, что его заменило (иначе пометка «см. актуальные факты»
+            # ведёт в пустоту: дословная старая реплика похожа на вопрос сильнее, чем новый факт).
+            for r in stale_rows:
+                head = self._head(r["superseded_by"], viewer)
+                if head is not None:
+                    rescue.setdefault(("fact", head), set()).add(r["source_episode_id"])
+        if not history:
+            # Устаревшие факты-кандидаты (в истории видны сами) тоже ведут к своей актуальной версии.
+            for key in [k_ for k_ in meta if k_[0] == "fact" and k_ not in ok]:
+                m = meta[key]
+                if m["superseded_by"] and can_see(viewer, m["owner"], m["visibility"]) and (key in cos or key in bm):
+                    head = self._head(m["superseded_by"], viewer)
+                    if head is not None:
+                        rescue.setdefault(("fact", head), set()).add(-key[1])
+        new = [k_ for k_ in rescue if k_ not in ok]
+        for key, m in self._load(set(new)).items():
+            if can_see(viewer, m["owner"], m["visibility"]) and m["active"]:
+                ok[key] = m
+
         # Косинус для кандидатов, пришедших не из векторного поиска.
         for key in ok:
             if key not in cos:
@@ -174,16 +206,6 @@ class Retriever:
                 acts[key] = math.log(acc)
         habit = self._habituation(list(ok), now)
 
-        # Эпизоды, из которых выведены факты, позже заменённые новыми: помечаем «устарело частично».
-        ep_ids = [k_[1] for k_ in ok if k_[0] == "episode"] + [m["episode_id"] for k_, m in ok.items()
-                                                               if k_[0] == "event" and m.get("episode_id")]
-        stale_eps: set[int] = set()
-        if ep_ids:
-            ph = ",".join("?" * len(ep_ids))
-            stale_eps = {r["source_episode_id"] for r in self.ctx.db.query(
-                f"SELECT DISTINCT source_episode_id FROM facts WHERE invalidated_at IS NOT NULL "
-                f"AND (visibility='family' OR owner_person=?) AND source_episode_id IN ({ph})", (viewer, *ep_ids))}
-
         ctx_dev = (context or {}).get("device")
         ctx_ch = (context or {}).get("channel")
         w = cfg.weights
@@ -192,6 +214,12 @@ class Retriever:
             c = cos.get(key, 0.0)
             r_ = cfg.relative_sim
             sem = (1 - r_) * self.ctx.sim01(c) + r_ * max(0.0, (c - c_lo) / span)
+            zs = zst.get(key[0]) or {}
+            if cfg.z_sim > 0 and zs.get("sd", 0.0) > 1e-6 and zs.get("n", 0) >= cfg.z_min_n:
+                # Насколько запись выделяется среди ВСЕХ записей для этого запроса (σ над средним):
+                # шкала не зависит от модели — у e5 постороннее и верное различаются на сотые доли косинуса.
+                z = (c - zs["mu"]) / zs["sd"]
+                sem = (1 - cfg.z_sim) * sem + cfg.z_sim * min(1.0, max(0.0, (z - cfg.z_lo) / (cfg.z_hi - cfg.z_lo)))
             rel = 0.75 * sem + 0.25 * (bm.get(key, 0.0) / bm_max)
             if key[0] == "entity" and key[1] in seeds:
                 rel = max(rel, 0.8)
@@ -231,7 +259,8 @@ class Retriever:
             elif key[0] == "event" and m.get("episode_id") in stale_eps:
                 text += " [возможно, устарело — см. актуальные факты]"
             scored.append(Recalled(key[0], key[1], text, ts, score, rel, act, imp, g, cm,
-                                   episode_id=m.get("episode_id"), extra={"meta": m, "in_period": in_period}))
+                                   episode_id=m.get("episode_id"),
+                                   extra={"meta": m, "in_period": in_period, "rescues": rescue.get(key, set())}))
 
         # Шлюз релевантности: абсолютный порог и порог относительно лучшего кандидата запроса.
         # Проходят без него: эпизоды/реплики из названного периода, упомянутые сущности
@@ -240,13 +269,49 @@ class Retriever:
             return (r.extra["in_period"] and r.unit_type != "fact") or r.graph >= cfg.graph_keep or \
                 (r.unit_type == "entity" and r.unit_id in seeds)
 
-        best = max((r.relevance for r in scored if not exempt(r)), default=0.0)
+        # Относительный порог — внутри своего раздела рабочей памяти: факт сравнивается с лучшим
+        # фактом, а не с дословной репликой (та почти всегда «похожее» на вопрос, чем сжатый факт).
+        def section(r: Recalled) -> str:
+            return "episodic" if r.unit_type in ("episode", "event") else r.unit_type
+
+        best: dict[str, float] = {}
+        for r in scored:
+            if not exempt(r):
+                best[section(r)] = max(best.get(section(r), 0.0), r.relevance)
         soft = 0.7 if deep else 1.0
-        rel_floor = max(cfg.min_relevance * soft, cfg.relative_relevance * soft * best)
         min_score = cfg.min_score * soft
-        scored = [r for r in scored if exempt(r) or (r.relevance >= rel_floor and r.score >= min_score)]
+
+        def passes(r: Recalled) -> bool:
+            floor = max(cfg.min_relevance * soft, cfg.relative_relevance * soft * best.get(section(r), 0.0))
+            return exempt(r) or (r.relevance >= floor and r.score >= min_score)
+
+        kept = [r for r in scored if passes(r)]
+        # Замена устаревшего проходит, если проходит само устаревшее (эпизод/реплика из него или старый факт).
+        shown_stale = {r.unit_id for r in kept if r.unit_type == "episode" and r.unit_id in stale_eps}
+        shown_stale |= {r.episode_id for r in kept if r.unit_type == "event" and r.episode_id in stale_eps}
+        stale_fact_cands = {-k_[1] for k_ in meta if k_[0] == "fact" and k_ not in ok}
+        kept_keys = {(r.unit_type, r.unit_id) for r in kept}
+        for r in scored:
+            if (r.unit_type, r.unit_id) not in kept_keys and r.extra["rescues"] & (shown_stale | stale_fact_cands):
+                if r.extra["rescues"] & shown_stale or r.relevance >= cfg.min_relevance * soft * 0.5:
+                    kept.append(r)
+        scored = kept
         scored.sort(key=lambda r: -r.score)
         return RecallResult(scored, time_range, seeds, len(cands), (time.perf_counter() - t0) * 1000)
+
+    def _head(self, fact_id: int | None, viewer: str) -> int | None:
+        """Актуальная версия факта по цепочке «заменён на» (видимая viewer), или None."""
+        seen: set[int] = set()
+        while fact_id is not None and fact_id not in seen and len(seen) < 8:
+            seen.add(fact_id)
+            r = self.ctx.db.one("SELECT id, superseded_by, invalidated_at, status, owner_person, visibility "
+                                "FROM facts WHERE id=?", (fact_id,))
+            if r is None or not can_see(viewer, r["owner_person"], r["visibility"]):
+                return None
+            if r["invalidated_at"] is None:
+                return r["id"] if r["status"] == "active" else None
+            fact_id = r["superseded_by"]
+        return None
 
     def _habituation(self, keys: list[tuple[str, int]], now: float) -> dict[tuple[str, int], float]:
         """Привыкание: то, что недавно много раз показывали и ни разу не использовали, — ниже.

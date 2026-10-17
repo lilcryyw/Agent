@@ -51,6 +51,11 @@ class Jarvis:
         data = Path(self.s.db_path).parent if self.s.db_path != ":memory:" else Path("data")
         # Модели речи можно держать вне папки данных (в образе), чтобы не копировать их в резервную копию.
         self.models_dir = Path(os.environ.get("JARVIS_MODELS_DIR") or data / "models")
+        if embedder is None and os.environ.get("JARVIS_EMBED_MODEL", "").startswith("@cf/"):
+            # Облегчённый режим (сервер с малой памятью): смысл текста считает Cloudflare Workers AI.
+            from cogmem.embed_remote import CloudflareEmbedder
+
+            embedder = CloudflareEmbedder(os.environ["JARVIS_EMBED_MODEL"])
         m = self.memory = CognitiveMemory(self.s.db_path, embedder=embedder, clock=clock)
         m.llm = subconscious or AnthropicStructuredLLM(client, model=self.s.subconscious_model,
                                                        effort=self.s.subconscious_effort, usage_sink=m.record_usage)
@@ -66,7 +71,8 @@ class Jarvis:
         self.devices = DeviceHub()
         self.voice = self._make_voice(self.models_dir)
         self.gateway = Gateway(m, self.devices, port=self.s.devices_port, on_utterance=self._device_utterance,
-                               tts=(lambda t: self.voice.speak(t, "wav")[0]) if self.voice else None) \
+                               tts=(lambda t: self.voice.speak(t, "wav")[0])
+                               if self.voice and getattr(self.voice, "can_speak", True) else None) \
             if self.s.devices_port else None
         self.vault = Vault(data / "vault.bin")
         self.tools = ToolBox(m, workshop=self.workshop, skills=self.skills, keys=self.keys, devices=self.devices,
@@ -158,8 +164,10 @@ class Jarvis:
     @staticmethod
     def _make_voice(models: Path):
         try:
-            import onnx_asr  # noqa: F401
-            import piper  # noqa: F401
+            if os.environ.get("JARVIS_STT", "local") != "cloudflare":
+                import onnx_asr  # noqa: F401
+            if os.environ.get("JARVIS_TTS", "piper") != "client":
+                import piper  # noqa: F401
         except Exception:  # noqa: BLE001 — голосовые зависимости не установлены
             return None
         from jarvis.voice import Voice
