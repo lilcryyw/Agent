@@ -53,6 +53,8 @@ class Settings:
     relay_domain: str = ""         # ретранслятор в России (например ru.jarvis.example.com)
     public_domain: str = ""        # основной домен
     api_port: int = 8780           # HTTP-API для iPhone/веб (0 — выключено)
+    call_port: int = 8790          # живой голосовой разговор (WebSocket, 0 — выключено)
+    call_effort: str = "low"       # глубина размышлений в живом разговоре: важнее быстро ответить
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -78,6 +80,8 @@ class Settings:
         s.devices_port = int(e.get("JARVIS_DEVICES_PORT", s.devices_port))
         s.devices_url = e.get("JARVIS_DEVICES_URL", s.devices_url)
         s.api_port = int(e.get("JARVIS_API_PORT", s.api_port))
+        s.call_port = int(e.get("JARVIS_CALL_PORT", s.call_port))
+        s.call_effort = e.get("JARVIS_CALL_EFFORT", s.call_effort)
         s.relay_domain = e.get("JARVIS_RELAY_DOMAIN", s.relay_domain)
         s.public_domain = e.get("JARVIS_DOMAIN", s.public_domain)
         people = e.get("JARVIS_PEOPLE", "")  # «mama:Ольга Петровна:family:Europe/Samara;papa:...»

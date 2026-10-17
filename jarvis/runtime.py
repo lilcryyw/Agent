@@ -66,6 +66,8 @@ class Jarvis:
         self.initiative = Initiative(m, m.llm, self.brain.handle_stimulus, self._notify)
         self.speakers = self._make_speakers(data)
         self.api = None
+        self.call = None
+        self._data = data
         if self.gateway is not None:
             # Сказанное Джарвисом по своей инициативе звучит и на устройствах с динамиком.
             self.on_notify(lambda person, text: self.gateway.say(person, text))
@@ -204,6 +206,12 @@ class Jarvis:
             self.api = Api(self, port=self.s.api_port, voice=self.voice)
             self.api.start()
             log.info("HTTP-API слушает порт %s", self.api.port)
+        if self.s.call_port and self.voice is not None and self.call is None:
+            from jarvis.channels.call import CallServer
+
+            self.call = CallServer(self, port=self.s.call_port, voice=self.voice, models_dir=self._data / "models")
+            self.call.start()
+            log.info("живой разговор слушает порт %s", self.call.port)
 
         def loop():
             while not self._stop.wait(interval_s):

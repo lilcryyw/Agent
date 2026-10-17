@@ -11,5 +11,9 @@
     handle /api* {
         reverse_proxy jarvis:8780
     }
+    # Живой голосовой разговор (WebSocket): микрофон → Джарвис → голос, без нажатий.
+    handle /call* {
+        reverse_proxy jarvis:8790
+    }
     respond "Джарвис на связи" 200
 }

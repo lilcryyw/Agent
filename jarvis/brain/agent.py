@@ -15,7 +15,7 @@ import re
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 
 from cogmem.memory import CognitiveMemory
 from cogmem.types import Observation
@@ -81,14 +81,16 @@ class Brain:
         self._ctx_edit_ok = True
 
     # ------------------------------------------------------------------ API
-    def _call(self, messages: list[dict]) -> Any:
+    def _call(self, messages: list[dict], on_text: Callable[[str], None] | None = None,
+              effort: str | None = None) -> Any:
+        """Один запрос к Claude. on_text — получать текст по мере генерации (живой голосовой разговор)."""
         kwargs: dict[str, Any] = dict(
             model=self.s.brain_model,
             max_tokens=self.s.max_tokens,
             system=[{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral", "ttl": "1h"}}],
             tools=self.tools.definitions(web=self.s.use_web_search),
             messages=messages,
-            output_config={"effort": self.s.brain_effort},
+            output_config={"effort": effort or self.s.brain_effort},
         )
         # Необязательные возможности API: если аккаунт/платформа их не поддерживает — отключаем по одной.
         while True:
@@ -101,10 +103,17 @@ class Brain:
                 # Старые результаты инструментов (снимки экрана, длинные выводы) убираются сервером.
                 extra["context_management"] = {"edits": [{"type": "clear_tool_uses_20250919"}]}
                 betas.append(CONTEXT_BETA)
+            api = self.client.beta.messages if betas else self.client.messages
+            more: dict[str, Any] = {"betas": betas} if betas else {}
             try:
-                if betas:
-                    return self.client.beta.messages.create(**kwargs, betas=betas, extra_body=extra)
-                return self.client.messages.create(**kwargs, extra_body=extra)
+                if on_text is None:
+                    return api.create(**kwargs, **more, extra_body=extra)
+                with api.stream(**kwargs, **more, extra_body=extra) as stream:
+                    for chunk in stream.text_stream:
+                        on_text(chunk)
+                    final = stream.get_final_message()
+                on_text("\n")  # конец шага: недосказанное предложение можно произносить
+                return final
             except Exception as exc:
                 import anthropic
 
@@ -124,10 +133,14 @@ class Brain:
         return self._locks.setdefault(person_id, threading.Lock())
 
     def handle(self, person_id: str, text: str, *, channel: str = "text", device: str | None = None,
-               note: str | None = None) -> TurnResult:
-        """Реплика человека. note — служебная пометка для контекста (например, «голос не узнан уверенно»)."""
+               note: str | None = None, on_text: Callable[[str], None] | None = None,
+               effort: str | None = None) -> TurnResult:
+        """Реплика человека. note — служебная пометка для контекста (например, «голос не узнан уверенно»).
+        on_text — получать ответ кусочками по мере генерации (включая служебные пометки ⟦…⟧ — их убирает
+        получатель). effort — своя глубина размышлений для хода (в живом разговоре важнее скорость)."""
         with self._lock(person_id):
-            return self._turn(person_id, text, origin="user", channel=channel, device=device, note=note)
+            return self._turn(person_id, text, origin="user", channel=channel, device=device, note=note,
+                              on_text=on_text, effort=effort)
 
     def handle_stimulus(self, person_id: str, reason: str) -> TurnResult:
         """Внутренний повод (цель, срок, событие): Джарвис сам решает, действовать ли и говорить ли."""
@@ -140,7 +153,8 @@ class Brain:
         return self.memory.spend_usd(month_start) >= self.s.monthly_budget_usd
 
     def _turn(self, person_id: str, text: str, *, origin: str, channel: str, device: str | None,
-              note: str | None = None) -> TurnResult:
+              note: str | None = None, on_text: Callable[[str], None] | None = None,
+              effort: str | None = None) -> TurnResult:
         mem = self.memory
         if origin == "user":
             obs = mem.observe(Observation(person_id, text, speaker="user", channel=channel, device=device))
@@ -161,6 +175,8 @@ class Brain:
                 return TurnResult("", [], [], [], 0.0, {}, new_session, True)
             msg = (f"Месячный бюджет на ИИ (${self.s.monthly_budget_usd:.0f}) исчерпан. "
                    "Увеличь JARVIS_MONTHLY_BUDGET_USD, если нужно продолжить.")
+            if on_text:
+                on_text(msg)
             mem.observe(Observation(person_id, msg, speaker="assistant", channel=channel, device=device))
             return TurnResult(msg, [], [], [], 0.0, {}, new_session)
 
@@ -201,7 +217,7 @@ class Brain:
         cost_before = mem.spend_usd()
         final_text = ""
         for _ in range(MAX_STEPS):
-            resp = self._call(sess.messages)
+            resp = self._call(sess.messages, on_text, effort)
             mem.record_usage(self.s.brain_model, "brain", resp.usage)
             for k in total:
                 total[k] += getattr(resp.usage, k, 0) or 0
@@ -213,6 +229,8 @@ class Brain:
                 # Защита от «увлёкся»: дальше без разрешения человека не тратим.
                 final_text = (f"Я потратил на эту задачу уже больше ${self.s.turn_budget_usd:.2f} и ещё не закончил. "
                               "Продолжать?")
+                if on_text:
+                    on_text(final_text)
                 sess.messages.append({"role": "user", "content": [
                     {"type": "tool_result", "tool_use_id": b.id, "content": "Остановлено: лимит стоимости хода.",
                      "is_error": True} for b in resp.content if getattr(b, "type", "") == "tool_use"]})
@@ -235,6 +253,8 @@ class Brain:
                 continue  # серверный инструмент (поиск) попросил продолжить
             if resp.stop_reason == "refusal":
                 final_text = "Извини, с этим я помочь не могу."
+                if on_text:
+                    on_text(final_text)
             break
 
         clean, used = split_used(final_text)

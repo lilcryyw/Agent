@@ -78,7 +78,7 @@ def test_webapp_inbox_and_speak(api):
     a, mem, seen, token = api
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     html = opener.open(f"http://127.0.0.1:{a.port}/app/", timeout=10).read().decode()
-    assert "Джарвис" in html and "MediaRecorder" in html
+    assert "Джарвис" in html and "AudioWorklet" in html and "/call" in html
     with pytest.raises(urllib.error.HTTPError):
         opener.open(f"http://127.0.0.1:{a.port}/app/../../http_api.py", timeout=10)
     a._outbox["owner"].append("Напоминаю: позвонить маме")

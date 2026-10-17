@@ -38,7 +38,9 @@ class Voice:
         self.dir.mkdir(parents=True, exist_ok=True)
         self._stt = None
         self._tts = None
-        self._lock = threading.Lock()
+        # Отдельные замки: в живом разговоре Джарвис слышит (перебивание), пока говорит.
+        self._stt_lock = threading.Lock()
+        self._tts_lock = threading.Lock()
 
     # --- распознавание ---
     def _stt_model(self):
@@ -65,7 +67,7 @@ class Voice:
                 w.setframerate(16000)
                 w.writeframes(pcm)
         try:
-            with self._lock:
+            with self._stt_lock:
                 text = self._stt_model().recognize(f.name)
         finally:
             os.unlink(f.name)
@@ -90,7 +92,7 @@ class Voice:
 
     def speak_wav(self, text: str) -> bytes:
         buf = io.BytesIO()
-        with self._lock, wave.open(buf, "wb") as w:
+        with self._tts_lock, wave.open(buf, "wb") as w:
             self._tts_voice().synthesize_wav(text, w)
         return buf.getvalue()
 

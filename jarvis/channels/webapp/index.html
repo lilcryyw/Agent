@@ -10,33 +10,57 @@
 <title>Джарвис</title>
 <script src="config.js"></script>
 <style>
-  :root { --bg:#0b1220; --card:#141d2e; --text:#e7edf7; --muted:#8a97ad; --accent:#4da3ff; --me:#1f3b63; --rec:#ff4d5e; }
+  :root { --bg:#0b1220; --card:#141d2e; --text:#e7edf7; --muted:#8a97ad; --accent:#4da3ff; --me:#1f3b63;
+          --end:#ff4d5e; --ok:#2ecc71; }
   @media (prefers-color-scheme: light) { :root { --bg:#f3f6fb; --card:#fff; --text:#122033; --muted:#5d6b80; --me:#d8e8ff; } }
-  * { box-sizing: border-box; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   body { margin:0; font:16px/1.45 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif; background:var(--bg);
          color:var(--text); display:flex; flex-direction:column; height:100dvh; }
   header { padding:14px 16px; font-weight:600; display:flex; justify-content:space-between; align-items:center; }
-  header small { color:var(--muted); font-weight:400; }
+  label { color:var(--muted); font-size:14px; font-weight:400; display:flex; gap:6px; align-items:center; }
   #log { flex:1; overflow-y:auto; padding:8px 16px; display:flex; flex-direction:column; gap:8px; }
-  .m { max-width:85%; padding:10px 12px; border-radius:14px; background:var(--card); white-space:pre-wrap; }
+  .m { max-width:85%; padding:10px 12px; border-radius:14px; background:var(--card); white-space:pre-wrap; overflow-wrap:anywhere; }
   .me { align-self:flex-end; background:var(--me); }
-  .sys { align-self:center; color:var(--muted); background:none; font-size:14px; }
+  .sys { align-self:center; color:var(--muted); background:none; font-size:14px; text-align:center; }
   footer { padding:12px 16px calc(12px + env(safe-area-inset-bottom)); display:flex; gap:10px; align-items:center; }
-  #text { flex:1; padding:12px 14px; border-radius:22px; border:1px solid var(--muted); background:var(--card);
+  #text { flex:1; min-width:0; padding:12px 14px; border-radius:22px; border:1px solid var(--muted); background:var(--card);
           color:var(--text); font-size:16px; }
-  #mic { width:64px; height:64px; border-radius:50%; border:none; background:var(--accent); color:#fff; font-size:28px; }
-  #mic.rec { background:var(--rec); animation:p 1s infinite; }
-  @keyframes p { 50% { transform:scale(1.08); } }
+  .round { width:60px; height:60px; flex:none; border-radius:50%; border:none; color:#fff; font-size:26px;
+           display:grid; place-items:center; cursor:pointer; }
+  #callBtn { background:var(--ok); }
   a.btn { display:inline-block; margin:6px 0 2px; padding:9px 14px; border-radius:12px; background:var(--accent);
           color:#fff; text-decoration:none; font-size:15px; }
   #setup { padding:24px 16px; display:none; }
   #setup input { width:100%; padding:12px; border-radius:10px; border:1px solid var(--muted); margin:8px 0; font-size:16px; }
   #setup button { padding:12px 18px; border-radius:10px; border:none; background:var(--accent); color:#fff; font-size:16px; }
-  label { color:var(--muted); font-size:14px; display:flex; gap:6px; align-items:center; }
+
+  /* Звонок */
+  #call { position:fixed; inset:0; background:radial-gradient(circle at 50% 35%, #12233f, #05080f 70%); color:#e7edf7;
+          display:none; flex-direction:column; align-items:center; justify-content:space-between;
+          padding:calc(24px + env(safe-area-inset-top)) 16px calc(28px + env(safe-area-inset-bottom)); z-index:10; }
+  #call.on { display:flex; }
+  #status { font-size:17px; color:#9fb3d1; min-height:24px; text-align:center; }
+  #orbWrap { flex:1; display:grid; place-items:center; width:100%; }
+  #orb { width:min(56vw, 240px); aspect-ratio:1; border-radius:50%; cursor:pointer;
+         background:radial-gradient(circle at 35% 30%, #bfe0ff, #4da3ff 45%, #1d4f9a 80%);
+         box-shadow:0 0 60px 10px rgba(77,163,255,.35); transition:transform .08s linear, filter .4s, box-shadow .4s; }
+  #call[data-s="thinking"] #orb { animation:breathe 1.6s ease-in-out infinite; filter:saturate(.6) brightness(.9); }
+  #call[data-s="speaking"] #orb { background:radial-gradient(circle at 35% 30%, #fff, #8fd0ff 40%, #2f6fd0 80%);
+                                  box-shadow:0 0 80px 20px rgba(143,208,255,.45); }
+  #call[data-s="connecting"] #orb, #call.muted #orb { filter:grayscale(.8) brightness(.7); }
+  @keyframes breathe { 50% { transform:scale(.9); } }
+  #caption { width:100%; max-width:520px; min-height:84px; max-height:30vh; overflow:hidden; text-align:center;
+             font-size:18px; line-height:1.4; }
+  #caption .you { color:#9fb3d1; font-size:15px; margin-bottom:6px; }
+  #controls { display:flex; gap:48px; margin-top:18px; }
+  #muteBtn { background:#2a3550; }
+  #muteBtn.on { background:#fff; color:#111; }
+  #endBtn { background:var(--end); }
+  #hint { color:#6f7f99; font-size:13px; margin-top:10px; text-align:center; }
 </style>
 </head>
 <body>
-<header>Джарвис <label><input type="checkbox" id="voiceOn" checked> отвечать голосом</label></header>
+<header>Джарвис <label><input type="checkbox" id="voiceOn" checked> озвучивать ответы в чате</label></header>
 <div id="setup">
   <p>Вставь ключ доступа (его выдаёт Джарвис: попроси «дай ссылку на приложение» или команда /token).</p>
   <input id="tok" placeholder="jv_…" autocomplete="off">
@@ -44,20 +68,33 @@
 </div>
 <div id="log"></div>
 <footer>
-  <input id="text" placeholder="Напиши или нажми микрофон" enterkeyhint="send">
-  <button id="mic" aria-label="Говорить">🎙</button>
+  <input id="text" placeholder="Напиши или позвони" enterkeyhint="send">
+  <button id="callBtn" class="round" aria-label="Позвонить Джарвису">📞</button>
 </footer>
+
+<div id="call" data-s="connecting">
+  <div id="status">Соединяю…</div>
+  <div id="orbWrap"><div id="orb" title="Коснись, чтобы перебить"></div></div>
+  <div id="caption"></div>
+  <div id="controls">
+    <button id="muteBtn" class="round" aria-label="Выключить микрофон">🎙</button>
+    <button id="endBtn" class="round" aria-label="Завершить">✕</button>
+  </div>
+  <div id="hint">Просто говори. Можно перебить — голосом или касанием шара.</div>
+</div>
+
 <script>
 const $ = (id) => document.getElementById(id);
 const store = { get: (k) => { try { return localStorage.getItem(k); } catch { return null; } },
                 set: (k, v) => { try { localStorage.setItem(k, v); } catch {} } };
 // Ключ можно передать ссылкой: /app/#t=jv_… (часть после # не уходит на сервер и в логи).
-const m = location.hash.match(/t=([\w-]+)/);
-if (m) { store.set("token", m[1]); history.replaceState(null, "", location.pathname); }
+const tm = location.hash.match(/t=([\w-]+)/);
+if (tm) { store.set("token", tm[1]); history.replaceState(null, "", location.pathname); }
 let token = store.get("token");
 const voiceOn = $("voiceOn");
 voiceOn.checked = store.get("voiceOn") !== "0";
 voiceOn.onchange = () => store.set("voiceOn", voiceOn.checked ? "1" : "0");
+const BASE = (window.JARVIS_API_BASE || "").replace(/\/$/, "");
 
 // Кнопки Команд iPhone: в тексте ответа [[ярлык:Имя|Надпись|вход]] превращается в кнопку shortcuts://
 const MARK = /\[\[ярлык:([^|\]]+)\|([^|\]]+)(?:\|([^\]]*))?\]\]/g;
@@ -77,7 +114,6 @@ function fill(d, text) {
   }
   d.appendChild(document.createTextNode(text.slice(last)));
 }
-
 function add(text, cls) {
   const d = document.createElement("div");
   d.className = "m " + (cls || "");
@@ -87,12 +123,11 @@ function add(text, cls) {
   return d;
 }
 function needToken() { $("setup").style.display = "block"; }
-$("save").onclick = () => { token = $("tok").value.trim(); store.set("token", token); $("setup").style.display = "none"; add("Ключ сохранён. Говори!", "sys"); };
+$("save").onclick = () => { token = $("tok").value.trim(); store.set("token", token); $("setup").style.display = "none"; add("Ключ сохранён. Нажми 📞 и говори!", "sys"); };
 if (!token) needToken();
 
 async function api(path, body, type) {
-  const base = (window.JARVIS_API_BASE || "").replace(/\/$/, "");
-  const r = await fetch(base + "/api/" + path, { method: "POST", body,
+  const r = await fetch(BASE + "/api/" + path, { method: "POST", body,
     headers: { "Authorization": "Bearer " + token, "X-Device": "web", ...(type ? { "Content-Type": type } : {}) } });
   if (r.status === 401) { needToken(); throw new Error("нужен ключ"); }
   if (!r.ok) throw new Error("сервер ответил " + r.status);
@@ -100,7 +135,7 @@ async function api(path, body, type) {
 }
 const player = new Audio();
 async function say(text) {
-  if (!voiceOn.checked) return;
+  if (!voiceOn.checked || call.on) return;
   try {  // голос Джарвиса с сервера; не вышло — голос телефона
     const r = await api("speak", JSON.stringify({ text }), "application/json");
     player.src = URL.createObjectURL(await r.blob());
@@ -117,37 +152,193 @@ async function ask(text) {
 }
 $("text").addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target.value.trim()) { ask(e.target.value.trim()); e.target.value = ""; } });
 
-// Голос: нажал — говоришь, нажал ещё раз (или пауза 1.5 с) — отправка.
-let rec = null, chunks = [], silenceTimer = null;
-$("mic").onclick = async () => {
-  if (rec && rec.state === "recording") { rec.stop(); return; }
+// ───────────────────────── Живой разговор ─────────────────────────
+// Микрофон работает непрерывно: звук 16 кГц уходит на сервер, тот сам слышит конец фразы,
+// отвечает голосом по предложениям и замолкает, если его перебили.
+const WORKLET = `
+class Mic extends AudioWorkletProcessor {
+  constructor() { super(); this.ratio = sampleRate / 16000; this.acc = 0; this.sum = 0; this.n = 0;
+                  this.buf = new Int16Array(1024); this.len = 0; }
+  process(inputs) {
+    const ch = inputs[0] && inputs[0][0];
+    if (!ch) return true;
+    for (let i = 0; i < ch.length; i++) {
+      this.sum += ch[i]; this.n++; this.acc += 1;
+      if (this.acc >= this.ratio) {           // усреднение = простой фильтр + понижение частоты
+        this.acc -= this.ratio;
+        const v = Math.max(-1, Math.min(1, this.sum / this.n)); this.sum = 0; this.n = 0;
+        this.buf[this.len++] = v * 32767;
+        if (this.len === this.buf.length) { this.port.postMessage(this.buf.buffer.slice(0)); this.len = 0; }
+      }
+    }
+    return true;
+  }
+}
+registerProcessor("mic", Mic);`;
+
+const call = { on: false, ws: null, ctx: null, stream: null, node: null, out: null, analyser: null,
+               muted: false, state: "connecting", level: 0, retries: 0, wake: null,
+               nextAt: 0, sources: [], playing: 0, done: 0, cancelled: new Set(), chain: Promise.resolve(),
+               heard: "", reply: "" };
+const STATUS = { connecting: "Соединяю…", listening: "Слушаю", thinking: "Думаю…", speaking: "Говорю — можно перебить" };
+
+function setState(s) {
+  call.state = s;
+  $("call").dataset.s = s;
+  $("status").textContent = call.muted && s === "listening" ? "Микрофон выключен" : STATUS[s] || s;
+}
+function caption() {
+  const c = $("caption"); c.textContent = "";
+  if (call.heard) { const y = document.createElement("div"); y.className = "you"; y.textContent = call.heard; c.appendChild(y); }
+  const r = document.createElement("div"); r.textContent = call.reply; c.appendChild(r);
+}
+
+function wsUrl() {
+  if (window.JARVIS_CALL_URL) return window.JARVIS_CALL_URL;
+  const base = BASE || location.origin;
+  return base.replace(/^http/, "ws") + "/call";
+}
+
+async function startCall() {
+  if (!token) { needToken(); return; }
+  if (call.on) return;
+  call.on = true; call.retries = 0; call.heard = ""; call.reply = ""; caption();
+  $("call").classList.add("on"); setState("connecting");
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    rec = new MediaRecorder(stream); chunks = [];
-    rec.ondataavailable = (e) => chunks.push(e.data);
-    rec.onstop = async () => {
-      stream.getTracks().forEach((t) => t.stop()); $("mic").classList.remove("rec"); clearInterval(silenceTimer);
-      const blob = new Blob(chunks, { type: rec.mimeType || "audio/webm" });
-      const wait = add("…слушаю");
-      try {
-        const r = await (await api("voice", blob, blob.type)).json();
-        wait.textContent = r.heard || "(не расслышал)"; wait.className = "m me";
-        add(r.reply); say(r.reply);
-      } catch (e) { wait.textContent = "Нет связи: " + e.message; }
+    // Эхоподавление: браузер вычитает голос Джарвиса из микрофона — можно говорить без наушников.
+    call.stream = await navigator.mediaDevices.getUserMedia({ audio: {
+      echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
+  } catch (e) { endCall("Нет доступа к микрофону: " + e.message); return; }
+  try { if (navigator.audioSession) navigator.audioSession.type = "play-and-record"; } catch {}
+  call.ctx = new (window.AudioContext || window.webkitAudioContext)();
+  await call.ctx.resume();
+  call.out = call.ctx.createGain(); call.analyser = call.ctx.createAnalyser(); call.analyser.fftSize = 512;
+  call.out.connect(call.analyser); call.analyser.connect(call.ctx.destination);
+  const src = call.ctx.createMediaStreamSource(call.stream);
+  try {
+    const url = URL.createObjectURL(new Blob([WORKLET], { type: "text/javascript" }));
+    await call.ctx.audioWorklet.addModule(url);
+    call.node = new AudioWorkletNode(call.ctx, "mic");
+    call.node.port.onmessage = (e) => onMic(e.data);
+  } catch {  // старые браузеры: ScriptProcessor
+    const sp = call.ctx.createScriptProcessor(4096, 1, 1), ratio = call.ctx.sampleRate / 16000;
+    sp.onaudioprocess = (e) => {
+      const x = e.inputBuffer.getChannelData(0), n = Math.floor(x.length / ratio), out = new Int16Array(n);
+      for (let i = 0; i < n; i++) out[i] = Math.max(-1, Math.min(1, x[Math.floor(i * ratio)])) * 32767;
+      onMic(out.buffer);
     };
-    // Автоостановка по тишине.
-    const ctx = new AudioContext(), an = ctx.createAnalyser(), buf = new Uint8Array(an.fftSize);
-    ctx.createMediaStreamSource(stream).connect(an);
-    let quietSince = Date.now(), spoke = false;
-    silenceTimer = setInterval(() => {
-      an.getByteTimeDomainData(buf);
-      const level = Math.max(...buf.map((v) => Math.abs(v - 128)));
-      if (level > 12) { spoke = true; quietSince = Date.now(); }
-      if (spoke && Date.now() - quietSince > 1500 && rec.state === "recording") rec.stop();
-    }, 100);
-    rec.start(); $("mic").classList.add("rec");
-  } catch (e) { add("Нет доступа к микрофону: " + e.message, "sys"); }
+    call.node = sp;
+  }
+  src.connect(call.node);
+  const sink = call.ctx.createGain(); sink.gain.value = 0; call.node.connect(sink); sink.connect(call.ctx.destination);
+  try { call.wake = await navigator.wakeLock?.request("screen"); } catch {}
+  connect();
+  requestAnimationFrame(animate);
+}
+
+function connect() {
+  const ws = new WebSocket(wsUrl());
+  ws.binaryType = "arraybuffer";
+  call.ws = ws;
+  ws.onopen = () => ws.send(JSON.stringify({ type: "hello", token, device: "web" }));
+  ws.onmessage = (e) => (typeof e.data === "string" ? onMsg(JSON.parse(e.data)) : onAudio(e.data));
+  ws.onclose = () => {
+    if (!call.on || call.ws !== ws) return;
+    stopPlayback();
+    if (call.retries++ < 5) { setState("connecting"); $("status").textContent = "Связь прервалась, переподключаюсь…"; setTimeout(connect, 1000 * call.retries); }
+    else endCall("Нет связи с Джарвисом.");
+  };
+}
+
+function onMic(buf) {
+  const a = new Int16Array(buf);
+  let s = 0; for (let i = 0; i < a.length; i += 4) s += a[i] * a[i];
+  call.level = Math.min(1, Math.sqrt(s / (a.length / 4)) / 6000);
+  if (call.muted || !call.ws || call.ws.readyState !== 1) return;
+  call.ws.send(buf);
+}
+
+function onMsg(m) {
+  if (m.type === "ready") { call.retries = 0; }
+  else if (m.type === "error") { if (/ключ/.test(m.text)) needToken(); endCall(m.text); }
+  else if (m.type === "state") setState(m.state);
+  else if (m.type === "heard") { call.heard = m.text; call.reply = ""; caption(); add(m.text, "me"); }
+  else if (m.type === "say") { if (!call.cancelled.has(m.turn)) { call.reply = (call.reply + " " + m.text).trim(); caption(); } }
+  else if (m.type === "reply") { if (m.turn > 1 && m.text) add(m.text + (call.cancelled.has(m.turn) ? " (перебит)" : "")); }
+  else if (m.type === "done") { call.done = m.turn; call.chain = call.chain.then(checkPlayed); }
+  else if (m.type === "interrupt") { call.cancelled.add(m.turn); stopPlayback(); }
+}
+
+function onAudio(data) {
+  const turn = new DataView(data).getUint32(0);
+  const mp3 = data.slice(4);
+  call.chain = call.chain.then(async () => {
+    if (call.cancelled.has(turn) || !call.ctx) return;
+    let buf;
+    try { buf = await call.ctx.decodeAudioData(mp3); } catch { return; }
+    if (call.cancelled.has(turn)) return;
+    const s = call.ctx.createBufferSource(); s.buffer = buf; s.connect(call.out);
+    const at = Math.max(call.ctx.currentTime + 0.05, call.nextAt);
+    s.start(at); call.nextAt = at + buf.duration;
+    call.sources.push(s); call.playing = turn;
+    s.onended = () => { call.sources = call.sources.filter((x) => x !== s); checkPlayed(); };
+  });
+}
+function checkPlayed() {
+  if (call.playing && !call.sources.length && call.done === call.playing && call.ws?.readyState === 1) {
+    call.ws.send(JSON.stringify({ type: "played", turn: call.playing }));
+    call.playing = 0;
+  }
+}
+function stopPlayback() {
+  for (const s of call.sources) { try { s.onended = null; s.stop(); } catch {} }
+  call.sources = []; call.nextAt = 0; call.playing = 0;
+}
+
+function animate() {
+  if (!call.on) return;
+  let lvl = call.level;
+  if (call.state === "speaking" && call.analyser) {
+    const d = new Uint8Array(call.analyser.fftSize); call.analyser.getByteTimeDomainData(d);
+    let s = 0; for (const v of d) s += (v - 128) * (v - 128);
+    lvl = Math.min(1, Math.sqrt(s / d.length) / 40);
+  }
+  if (call.state !== "thinking") $("orb").style.transform = `scale(${1 + (call.muted ? 0 : lvl) * 0.35})`;
+  else $("orb").style.transform = "";
+  requestAnimationFrame(animate);
+}
+
+function endCall(reason) {
+  if (!call.on) return;
+  call.on = false;
+  try { call.ws?.close(); } catch {}
+  call.ws = null;
+  stopPlayback();
+  call.stream?.getTracks().forEach((t) => t.stop());
+  try { call.ctx?.close(); } catch {}
+  call.ctx = null; call.node = null;
+  try { call.wake?.release(); } catch {}
+  call.cancelled = new Set(); call.chain = Promise.resolve(); call.done = 0;
+  $("call").classList.remove("on", "muted");
+  call.muted = false; $("muteBtn").classList.remove("on"); $("muteBtn").textContent = "🎙";
+  if (reason) add(reason, "sys");
+}
+
+$("callBtn").onclick = startCall;
+$("endBtn").onclick = () => endCall();
+$("orb").onclick = () => { if (call.ws?.readyState === 1 && (call.state === "speaking" || call.state === "thinking")) call.ws.send(JSON.stringify({ type: "interrupt" })); };
+$("muteBtn").onclick = () => {
+  call.muted = !call.muted;
+  $("muteBtn").classList.toggle("on", call.muted); $("muteBtn").textContent = call.muted ? "🔇" : "🎙";
+  $("call").classList.toggle("muted", call.muted);
+  if (call.ws?.readyState === 1) call.ws.send(JSON.stringify({ type: "mute", on: call.muted }));
+  setState(call.state);
 };
+document.addEventListener("visibilitychange", async () => {  // вернулся в приложение — разбудить звук
+  if (document.visibilityState === "visible" && call.on) {
+    try { await call.ctx?.resume(); call.wake = await navigator.wakeLock?.request("screen"); } catch {}
+  }
+});
 
 // Сообщения по инициативе Джарвиса (напоминания и т.п.).
 async function inbox() {
