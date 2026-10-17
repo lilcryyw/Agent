@@ -181,3 +181,17 @@ def test_failed_llm_job_is_retried_not_lost():
     clock.advance(minutes=5)
     m.tick()
     assert m.ctx.db.scalar("SELECT status FROM jobs") == "done"
+
+
+def test_job_interrupted_by_crash_is_resumed(tmp_path):
+    from cogmem.store import Database
+    from cogmem.jobs import JobQueue
+
+    db = Database(tmp_path / "m.db")
+    clock = FakeClock()
+    q = JobQueue(db, clock)
+    q.enqueue("encode_episode", "encode:1", {"episode_id": 1})
+    db.execute("UPDATE jobs SET status='running'")  # «упали» посреди задачи
+    db.close()
+    q2 = JobQueue(Database(tmp_path / "m.db"), clock)
+    assert q2.pending("encode_episode") == 1

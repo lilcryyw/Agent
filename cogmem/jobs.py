@@ -22,6 +22,8 @@ class JobQueue:
     def __init__(self, db: Database, clock: Clock):
         self.db = db
         self.clock = clock
+        # Процесс мог упасть посреди задачи — вернуть такие задачи в очередь.
+        self.db.execute("UPDATE jobs SET status='pending' WHERE status='running'")
 
     def enqueue(self, kind: str, key: str, payload: dict | None = None, delay: float = 0.0) -> bool:
         now = self.clock.now()
