@@ -5,6 +5,9 @@
   POST /api/voice  тело = аудио (m4a/ogg/wav/webm)   → {"heard": "...", "reply": "..."}
                    ?reply=audio — вместо JSON сразу mp3 с голосом Джарвиса
   POST /api/event  {"text": "Пришёл домой"}           → событие для памяти и инициативы (не команда!)
+  POST /api/speak  {"text": "..."}                    → mp3 голосом Джарвиса
+  POST /api/inbox                                      → {"messages": [...]} — что Джарвис сказал сам (инициатива)
+  GET  /app/                                           → веб-приложение с голосом (ставится на экран телефона)
   GET  /api/health
 """
 
@@ -15,13 +18,18 @@ import json
 import logging
 import secrets
 import threading
+from collections import defaultdict, deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from cogmem.types import Observation
 
 log = logging.getLogger(__name__)
 MAX_BODY = 25 * 1024 * 1024
+WEBAPP = Path(__file__).with_name("webapp")
+MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".json": "application/json",
+        ".svg": "image/svg+xml"}
 
 
 def _h(s: str) -> str:
@@ -47,6 +55,9 @@ class Api:
         self.voice = voice
         self.host, self.port = host, port
         self._srv: ThreadingHTTPServer | None = None
+        self._outbox: dict[str, deque] = defaultdict(lambda: deque(maxlen=50))
+        if hasattr(jarvis, "on_notify"):
+            jarvis.on_notify(lambda person, text: self._outbox[person].append(text))
 
     def start(self) -> None:
         api = self
@@ -66,8 +77,19 @@ class Api:
                 self._send(code, json.dumps(obj, ensure_ascii=False).encode())
 
             def do_GET(self):  # noqa: N802
-                if urlparse(self.path).path == "/api/health":
+                path = urlparse(self.path).path
+                if path == "/api/health":
                     return self._json(200, {"ok": True})
+                if path in ("/app", "/app/") or path.startswith("/app/"):
+                    name = path[len("/app/"):] or "index.html"
+                    f = (WEBAPP / name).resolve()
+                    if WEBAPP.resolve() in f.parents and f.is_file():
+                        return self._send(200, f.read_bytes(), MIME.get(f.suffix, "application/octet-stream"))
+                    if path == "/app":
+                        self.send_response(301)
+                        self.send_header("Location", "/app/")
+                        self.end_headers()
+                        return None
                 self._json(404, {"error": "нет такого адреса"})
 
             def do_POST(self):  # noqa: N802
@@ -99,6 +121,16 @@ class Api:
                             audio, mime = api.voice.speak(r.text, "mp3")
                             return self._send(200, audio, mime)
                         return self._json(200, {"heard": heard, "reply": r.text})
+                    if u.path == "/api/speak":
+                        if api.voice is None:
+                            return self._json(501, {"error": "голос не настроен на сервере"})
+                        text = json.loads(body or b"{}").get("text", "").strip()[:2000]
+                        audio, mime = api.voice.speak(text or "…", "mp3")
+                        return self._send(200, audio, mime)
+                    if u.path == "/api/inbox":
+                        q = api._outbox[person]
+                        msgs = [q.popleft() for _ in range(len(q))]
+                        return self._json(200, {"messages": msgs})
                     if u.path == "/api/event":
                         text = json.loads(body or b"{}").get("text", "").strip()
                         if text:

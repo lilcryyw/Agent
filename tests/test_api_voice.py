@@ -69,3 +69,18 @@ def test_real_voice_round_trip(tmp_path):
     assert mime == "audio/ogg" and len(audio) > 1000
     heard = v.transcribe(audio).lower()
     assert "напомни" in heard and "маме" in heard
+
+
+def test_webapp_inbox_and_speak(api):
+    a, mem, seen, token = api
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    html = opener.open(f"http://127.0.0.1:{a.port}/app/", timeout=10).read().decode()
+    assert "Джарвис" in html and "MediaRecorder" in html
+    with pytest.raises(urllib.error.HTTPError):
+        opener.open(f"http://127.0.0.1:{a.port}/app/../../http_api.py", timeout=10)
+    a._outbox["owner"].append("Напоминаю: позвонить маме")
+    _, _, body = post(a, "/api/inbox", b"{}", token)
+    assert json.loads(body)["messages"] == ["Напоминаю: позвонить маме"]
+    assert json.loads(post(a, "/api/inbox", b"{}", token)[2])["messages"] == []
+    _, ctype, body = post(a, "/api/speak", json.dumps({"text": "Привет"}).encode(), token)
+    assert ctype == "audio/mpeg"

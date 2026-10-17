@@ -5,6 +5,9 @@
         reverse_proxy jarvis:8765
     }
     # Вход для iPhone (Команды Siri), веб-приложения и автоматизаций.
+    handle /app* {
+        reverse_proxy jarvis:8780
+    }
     handle /api* {
         reverse_proxy jarvis:8780
     }

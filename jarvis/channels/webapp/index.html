@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b1220">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon.svg">
+<title>Джарвис</title>
+<style>
+  :root { --bg:#0b1220; --card:#141d2e; --text:#e7edf7; --muted:#8a97ad; --accent:#4da3ff; --me:#1f3b63; --rec:#ff4d5e; }
+  @media (prefers-color-scheme: light) { :root { --bg:#f3f6fb; --card:#fff; --text:#122033; --muted:#5d6b80; --me:#d8e8ff; } }
+  * { box-sizing: border-box; }
+  body { margin:0; font:16px/1.45 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif; background:var(--bg);
+         color:var(--text); display:flex; flex-direction:column; height:100dvh; }
+  header { padding:14px 16px; font-weight:600; display:flex; justify-content:space-between; align-items:center; }
+  header small { color:var(--muted); font-weight:400; }
+  #log { flex:1; overflow-y:auto; padding:8px 16px; display:flex; flex-direction:column; gap:8px; }
+  .m { max-width:85%; padding:10px 12px; border-radius:14px; background:var(--card); white-space:pre-wrap; }
+  .me { align-self:flex-end; background:var(--me); }
+  .sys { align-self:center; color:var(--muted); background:none; font-size:14px; }
+  footer { padding:12px 16px calc(12px + env(safe-area-inset-bottom)); display:flex; gap:10px; align-items:center; }
+  #text { flex:1; padding:12px 14px; border-radius:22px; border:1px solid var(--muted); background:var(--card);
+          color:var(--text); font-size:16px; }
+  #mic { width:64px; height:64px; border-radius:50%; border:none; background:var(--accent); color:#fff; font-size:28px; }
+  #mic.rec { background:var(--rec); animation:p 1s infinite; }
+  @keyframes p { 50% { transform:scale(1.08); } }
+  #setup { padding:24px 16px; display:none; }
+  #setup input { width:100%; padding:12px; border-radius:10px; border:1px solid var(--muted); margin:8px 0; font-size:16px; }
+  #setup button { padding:12px 18px; border-radius:10px; border:none; background:var(--accent); color:#fff; font-size:16px; }
+  label { color:var(--muted); font-size:14px; display:flex; gap:6px; align-items:center; }
+</style>
+</head>
+<body>
+<header>Джарвис <label><input type="checkbox" id="voiceOn" checked> отвечать голосом</label></header>
+<div id="setup">
+  <p>Вставь ключ доступа (его выдаёт Джарвис: попроси «дай ссылку на приложение» или команда /token).</p>
+  <input id="tok" placeholder="jv_…" autocomplete="off">
+  <button id="save">Готово</button>
+</div>
+<div id="log"></div>
+<footer>
+  <input id="text" placeholder="Напиши или нажми микрофон" enterkeyhint="send">
+  <button id="mic" aria-label="Говорить">🎙</button>
+</footer>
+<script>
+const $ = (id) => document.getElementById(id);
+const store = { get: (k) => { try { return localStorage.getItem(k); } catch { return null; } },
+                set: (k, v) => { try { localStorage.setItem(k, v); } catch {} } };
+// Ключ можно передать ссылкой: /app/#t=jv_… (часть после # не уходит на сервер и в логи).
+const m = location.hash.match(/t=([\w-]+)/);
+if (m) { store.set("token", m[1]); history.replaceState(null, "", location.pathname); }
+let token = store.get("token");
+const voiceOn = $("voiceOn");
+voiceOn.checked = store.get("voiceOn") !== "0";
+voiceOn.onchange = () => store.set("voiceOn", voiceOn.checked ? "1" : "0");
+
+function add(text, cls) {
+  const d = document.createElement("div");
+  d.className = "m " + (cls || "");
+  d.textContent = text;
+  $("log").appendChild(d);
+  d.scrollIntoView({ behavior: "smooth" });
+  return d;
+}
+function needToken() { $("setup").style.display = "block"; }
+$("save").onclick = () => { token = $("tok").value.trim(); store.set("token", token); $("setup").style.display = "none"; add("Ключ сохранён. Говори!", "sys"); };
+if (!token) needToken();
+
+async function api(path, body, type) {
+  const r = await fetch("/api/" + path, { method: "POST", body,
+    headers: { "Authorization": "Bearer " + token, "X-Device": "web", ...(type ? { "Content-Type": type } : {}) } });
+  if (r.status === 401) { needToken(); throw new Error("нужен ключ"); }
+  if (!r.ok) throw new Error("сервер ответил " + r.status);
+  return r;
+}
+const player = new Audio();
+async function say(text) {
+  if (!voiceOn.checked) return;
+  try {  // голос Джарвиса с сервера; не вышло — голос телефона
+    const r = await api("speak", JSON.stringify({ text }), "application/json");
+    player.src = URL.createObjectURL(await r.blob());
+    await player.play();
+  } catch { speechSynthesis.speak(Object.assign(new SpeechSynthesisUtterance(text), { lang: "ru-RU" })); }
+}
+async function ask(text) {
+  add(text, "me");
+  const wait = add("…");
+  try {
+    const r = await (await api("ask", JSON.stringify({ text }), "application/json")).json();
+    wait.textContent = r.reply; say(r.reply);
+  } catch (e) { wait.textContent = "Нет связи: " + e.message; }
+}
+$("text").addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target.value.trim()) { ask(e.target.value.trim()); e.target.value = ""; } });
+
+// Голос: нажал — говоришь, нажал ещё раз (или пауза 1.5 с) — отправка.
+let rec = null, chunks = [], silenceTimer = null;
+$("mic").onclick = async () => {
+  if (rec && rec.state === "recording") { rec.stop(); return; }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    rec = new MediaRecorder(stream); chunks = [];
+    rec.ondataavailable = (e) => chunks.push(e.data);
+    rec.onstop = async () => {
+      stream.getTracks().forEach((t) => t.stop()); $("mic").classList.remove("rec"); clearInterval(silenceTimer);
+      const blob = new Blob(chunks, { type: rec.mimeType || "audio/webm" });
+      const wait = add("…слушаю");
+      try {
+        const r = await (await api("voice", blob, blob.type)).json();
+        wait.textContent = r.heard || "(не расслышал)"; wait.className = "m me";
+        add(r.reply); say(r.reply);
+      } catch (e) { wait.textContent = "Нет связи: " + e.message; }
+    };
+    // Автоостановка по тишине.
+    const ctx = new AudioContext(), an = ctx.createAnalyser(), buf = new Uint8Array(an.fftSize);
+    ctx.createMediaStreamSource(stream).connect(an);
+    let quietSince = Date.now(), spoke = false;
+    silenceTimer = setInterval(() => {
+      an.getByteTimeDomainData(buf);
+      const level = Math.max(...buf.map((v) => Math.abs(v - 128)));
+      if (level > 12) { spoke = true; quietSince = Date.now(); }
+      if (spoke && Date.now() - quietSince > 1500 && rec.state === "recording") rec.stop();
+    }, 100);
+    rec.start(); $("mic").classList.add("rec");
+  } catch (e) { add("Нет доступа к микрофону: " + e.message, "sys"); }
+};
+
+// Сообщения по инициативе Джарвиса (напоминания и т.п.).
+async function inbox() {
+  if (!token) return;
+  try {
+    const r = await (await api("inbox", "{}", "application/json")).json();
+    for (const t of r.messages || []) { add(t); say(t); }
+  } catch {}
+}
+setInterval(inbox, 30000); inbox();
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+</script>
+</body>
+</html>
