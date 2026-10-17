@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS episodes (
     visibility   TEXT NOT NULL DEFAULT 'private' CHECK (visibility IN ('private','family')),
     parent_id    INTEGER,
     event_count  INTEGER NOT NULL DEFAULT 0,
+    stale        INTEGER NOT NULL DEFAULT 0,  -- сводка устарела (поздний/удалённый эпизод) — пересобрать во «сне»
     embedding    BLOB,
     created_at   REAL NOT NULL,
     updated_at   REAL NOT NULL
@@ -123,6 +124,8 @@ CREATE TABLE IF NOT EXISTS facts (
     source_episode_id INTEGER,
     owner_person     TEXT,
     visibility       TEXT NOT NULL DEFAULT 'private' CHECK (visibility IN ('private','family')),
+    observed_at      REAL,                        -- когда это было сказано/замечено (время реплик-доказательств)
+    replaces_id      INTEGER,                     -- для pending_review: какой факт заменит при одобрении
     embedding        BLOB
 );
 CREATE INDEX IF NOT EXISTS ix_facts_subject ON facts(subject_id, predicate);
@@ -247,6 +250,7 @@ CREATE TABLE IF NOT EXISTS llm_usage (
 );
 
 -- Полнотекстовый индекс по основам слов (русский стемминг делаем сами до записи).
+-- rowid = код_типа << 40 | id (cogmem.store.db.fts_rowid) — обновление и удаление без перебора таблицы.
 CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(
     unit_type UNINDEXED,
     unit_id UNINDEXED,

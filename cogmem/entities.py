@@ -16,6 +16,27 @@ from cogmem.text import ru
 
 ENTITY_KINDS = {"person", "place", "device", "org", "object", "topic", "pet", "self", "other"}
 
+# Родственные слова: «мама» у каждого члена семьи своя — такие прозвища никогда не бывают общими (scope='').
+_KIN_WORDS = """мама мать мамочка мамуля маман матушка папа отец папочка папуля батя бабушка баба бабуля бабуленька
+дедушка дед деда дедуля сын сынок сыночек дочь дочка доченька жена супруга муж супруг брат братик братишка сестра
+сестрёнка сестричка тётя тетя тётка дядя внук внучка правнук правнучка свекровь свёкор свекор тёща теща тесть
+зять невестка сноха племянник племянница кузен кузина крёстная крестная крёстный крестный мачеха отчим пасынок
+падчерица родители предки любимая любимый милый милая""".split()
+_KIN_FILLER = "мой моя моё мое мои наш наша наше наши твой твоя старший старшая младший младшая родной родная".split()
+_KIN = {ru.stem(ru.normalize(w)) for w in _KIN_WORDS}
+_KIN_FILL = {ru.stem(ru.normalize(w)) for w in _KIN_FILLER}
+
+
+def is_kinship_norm(alias_norm: str) -> bool:
+    """Нормализованное прозвище состоит только из родственных слов («мам», «мо мам», «стар брат»)?"""
+    toks = alias_norm.split()
+    core = [t for t in toks if t not in _KIN_FILL]
+    return bool(core) and all(t in _KIN for t in core)
+
+
+def is_kinship(alias: str) -> bool:
+    return is_kinship_norm(ru.alias_norm(alias))
+
 
 @dataclass
 class Entity:
@@ -88,7 +109,7 @@ class EntityStore:
                actor: str = "subconscious", reason: str = "") -> int:
         kind = kind if kind in ENTITY_KINDS else "other"
         now = self.ctx.clock.now()
-        vec = self.ctx.embed1(name)
+        vec = self.ctx.embed1(name.strip())
         with self.ctx.db.tx():
             cur = self.ctx.db.execute(
                 "INSERT INTO entities(kind, name, owner_person, visibility, importance, embedding, created_at, updated_at) "
@@ -96,18 +117,23 @@ class EntityStore:
                 (kind, name.strip(), owner, visibility, importance, to_blob(vec), now, now),
             )
             eid = cur.lastrowid
-            self.add_alias(eid, name, scope="")
+            # Родственное слово — прозвище только в речи того, чья это родня (иначе «мама» жены = мама мужа).
+            kin_scope = alias_scope or owner or None
+            self.add_alias(eid, name, scope=(kin_scope or "") if is_kinship(name) else "",
+                           skip=is_kinship(name) and kin_scope is None)
             for a in aliases or []:
-                self.add_alias(eid, a, scope=alias_scope)
+                self.add_alias(eid, a, scope=(kin_scope or "") if is_kinship(a) else alias_scope,
+                               skip=is_kinship(a) and kin_scope is None)
             self.ctx.fts_add("entity", eid, name)
             self.ctx.trace("entity", eid, "created", now)
             self.ctx.audit.log(actor, "create", "entity", eid, after={"name": name, "kind": kind}, reason=reason)
         self.ctx.index.add("entity", eid, vec, owner=owner, visibility=visibility, ts=now)
         return eid
 
-    def add_alias(self, entity_id: int, alias: str, scope: str = "") -> None:
+    def add_alias(self, entity_id: int, alias: str, scope: str = "", *, skip: bool = False) -> None:
+        """Прозвище → сущность. Родственное слово без scope (чья это мама?) не регистрируется."""
         norm = ru.alias_norm(alias)
-        if not norm:
+        if not norm or skip or (scope == "" and is_kinship_norm(norm)):
             return
         self.ctx.db.execute(
             "INSERT OR IGNORE INTO aliases(alias_norm, entity_id, person_scope) VALUES (?,?,?)", (norm, entity_id, scope)

@@ -1,7 +1,7 @@
 """Хаб устройств: что подключено и как с ним работать.
 
 Устройство умеет действия (call): run — выполнить код/команду; screenshot — снимок экрана;
-input — мышь и клавиатура. Реальные устройства подключаются через шлюз (jarvis.devices.gateway),
+input — мышь и клавиатура (и жесты на телефоне); ui_tree — дерево элементов экрана текстом (Android). Реальные устройства подключаются через шлюз (jarvis.devices.gateway),
 в тестах — напрямую функцией. У каждого устройства есть владелец: устройства других членов семьи —
 под замком (ключ relative_device).
 """
@@ -33,8 +33,40 @@ class Device:
     call: Call
     capabilities: set[str] = field(default_factory=set)  # screen, input, termux_api, ...
 
-    def run(self, language: str, code: str, timeout: float = 120.0) -> DeviceResult:
-        return self.call("run", {"language": language, "code": code}, timeout)
+    def run(self, language: str, code: str, timeout: float = 120.0, *, env: dict[str, str] | None = None,
+            cancel: threading.Event | None = None) -> DeviceResult:
+        args = {"language": language, "code": code}
+        if env:
+            args["env"] = env
+        return self.invoke("run", args, timeout, cancel)
+
+    def invoke(self, action: str, args: dict, timeout: float, cancel: threading.Event | None = None) -> DeviceResult:
+        """Вызов с возможностью отмены: «стоп» — устройству уходит отмена, ответ не ждём."""
+        if cancel is None:
+            return self.call(action, args, timeout)
+        if cancel.is_set():
+            return DeviceResult(False, "остановлено по просьбе человека")
+        box: dict = {}
+
+        def go():
+            try:
+                box["r"] = self.call(action, args, timeout)
+            except Exception as exc:  # noqa: BLE001
+                box["r"] = DeviceResult(False, f"{type(exc).__name__}: {exc}")
+
+        t = threading.Thread(target=go, daemon=True)
+        t.start()
+        while t.is_alive():
+            t.join(0.2)
+            if cancel.is_set():
+                stop = getattr(self.call, "cancel", None)
+                if callable(stop):
+                    try:
+                        stop()
+                    except Exception:  # noqa: BLE001
+                        pass
+                return DeviceResult(False, "остановлено по просьбе человека")
+        return box["r"]
 
 
 class DeviceHub:

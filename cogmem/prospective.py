@@ -3,11 +3,45 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from cogmem.context import Ctx
 from cogmem.retrieve.recall import fmt_date
 from cogmem.text import ru
 from cogmem.types import ref
+
+
+RECURRENCES = ("hourly", "daily", "weekdays", "weekly", "monthly")
+
+
+def next_due(due_ts: float, recurrence: str, tz: str, now: float) -> float | None:
+    """Следующий срок повторяющегося намерения (по местному времени человека), строго позже now.
+    Пропущенные разы (сервер спал) не навёрстываются — только ближайший будущий."""
+    if recurrence not in RECURRENCES:
+        return None
+    zone = ZoneInfo(tz)
+    t = datetime.fromtimestamp(due_ts, zone)
+    for _ in range(100_000):
+        if recurrence == "hourly":
+            t = t + timedelta(hours=1)
+        elif recurrence == "daily":
+            t = (t.replace(tzinfo=None) + timedelta(days=1)).replace(tzinfo=zone)
+        elif recurrence == "weekdays":
+            t = (t.replace(tzinfo=None) + timedelta(days=1)).replace(tzinfo=zone)
+            while t.weekday() >= 5:
+                t = (t.replace(tzinfo=None) + timedelta(days=1)).replace(tzinfo=zone)
+        elif recurrence == "weekly":
+            t = (t.replace(tzinfo=None) + timedelta(days=7)).replace(tzinfo=zone)
+        else:  # monthly: то же число (или последний день короткого месяца)
+            import calendar
+
+            y, m = (t.year + 1, 1) if t.month == 12 else (t.year, t.month + 1)
+            day = min(t.day, calendar.monthrange(y, m)[1])
+            t = t.replace(year=y, month=m, day=day)
+        if t.timestamp() > now:
+            return t.timestamp()
+    return None
 
 
 @dataclass
@@ -58,6 +92,22 @@ class Intentions:
                             (status, self.ctx.clock.now(), intention_id))
         self.ctx.audit.log(actor, "status", "intention", intention_id, after=status)
 
+    def fire(self, intention_id: int, actor: str = "runtime") -> None:
+        """Намерение сработало: разовое — «fired»; повторяющееся — переносится на следующий срок и ждёт дальше."""
+        r = self.ctx.db.one("SELECT i.*, p.timezone AS tz FROM intentions i LEFT JOIN persons p ON p.id=i.person_id "
+                            "WHERE i.id=?", (intention_id,))
+        if r is None:
+            return
+        nxt = None
+        if r["recurrence"] and r["due_ts"] is not None:
+            nxt = next_due(r["due_ts"], r["recurrence"], r["tz"] or "Europe/Paris", self.ctx.clock.now())
+        if nxt is None:
+            self.set_status(intention_id, "fired", actor=actor)
+            return
+        self.ctx.db.execute("UPDATE intentions SET due_ts=?, status='pending', updated_at=? WHERE id=?",
+                            (nxt, self.ctx.clock.now(), intention_id))
+        self.ctx.audit.log(actor, "reschedule", "intention", intention_id, after={"due": nxt})
+
     def due(self, now: float | None = None) -> list[Intention]:
         """Намерения по времени, которым пора сработать (для планировщика)."""
         now = self.ctx.clock.now() if now is None else now
@@ -83,5 +133,6 @@ class Intentions:
         for it in found.values():
             when = f"к {fmt_date(it.due_ts, tz, with_time=True)}" if it.due_ts else (it.trigger_text or "при случае")
             overdue = " (ПРОСРОЧЕНО)" if it.due_ts and it.due_ts < now else ""
-            out.append(f"[{ref('intention', it.id)}] {when}{overdue}: {it.action_text}")
+            rep = f" (повтор: {it.recurrence})" if it.recurrence else ""
+            out.append(f"[{ref('intention', it.id)}] {when}{rep}{overdue}: {it.action_text}")
         return out

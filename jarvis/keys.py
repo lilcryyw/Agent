@@ -29,6 +29,32 @@ SCOPES = {
 DURATIONS = {"once", "today", "week", "forever"}
 TRUST_SUGGEST_AFTER = 20
 
+# Ходы «по внутреннему поводу», в которых есть чужой текст (уведомления, SMS с устройств).
+# Инициатива отмечает такой ход перед вызовом мышления; органы в таком ходе не открывают замок.
+_external_turns: set[str] = set()
+
+
+def mark_external_turn(person_id: str, on: bool = True) -> None:
+    (_external_turns.add if on else _external_turns.discard)(person_id)
+
+
+def is_external_turn(person_id: str) -> bool:
+    return person_id in _external_turns
+
+
+def grant_refusal(role: str | None, scope: str, *, limit_eur: float | None, duration: str) -> str | None:
+    """Может ли человек с этой ролью выдать такой ключ сам себе. → причина отказа или None.
+
+    Чужие устройства открывает только владелец семьи; остальные члены семьи могут разрешать
+    траты только с лимитом и не дольше, чем на сегодня (сейф — общий на семью)."""
+    if role == "owner":
+        return None
+    if scope == "relative_device":
+        return "Доступ к устройствам других членов семьи может разрешить только владелец семьи."
+    if scope == "money" and (limit_eur is None or duration not in ("once", "today")):
+        return "Траты для члена семьи — только с лимитом (limit_eur) и не дольше, чем на сегодня."
+    return None
+
 
 @dataclass
 class Key:
@@ -120,8 +146,8 @@ class KeyRing:
         for k in self.active(person_id):
             if k.scope != scope:
                 continue
-            if k.target and k.target not in t and t not in k.target:
-                continue
+            if k.target and (not t or (k.target not in t and t not in k.target)):
+                continue  # ключ «для кого-то» не подходит к действию без цели или с другой целью
             if k.limit_eur is not None:
                 if amount_eur is None or k.spent_eur + amount_eur > k.limit_eur + 1e-9:
                     continue

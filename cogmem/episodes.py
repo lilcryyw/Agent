@@ -97,26 +97,29 @@ class EpisodeStream:
         return cur.lastrowid
 
     def close(self, episode_id: int, reason: str = "") -> None:
-        """Закрыть эпизод: вектор-центр, предварительный заголовок, задача на кодирование."""
-        ep = self.get(episode_id)
-        if ep is None or ep.status != "open":
-            return
-        events = self.events_of(episode_id)
-        now = self.ctx.clock.now()
-        if not events:
-            self.ctx.db.execute("DELETE FROM episodes WHERE id=?", (episode_id,))
-            return
-        centroid = self._centroid(episode_id)
-        first_user = next((e["text"] for e in events if e["speaker"] == "user"), events[0]["text"])
-        title = first_user.strip().replace("\n", " ")[:80]
-        importance = max(e["importance"] for e in events)
-        emotion = max((e["emotion"] for e in events), key=abs)
+        """Закрыть эпизод: вектор-центр, предварительный заголовок, задача на кодирование.
+        Проверка статуса и закрытие — в одной транзакции (пульс и новая реплика могут закрывать одновременно)."""
         with self.ctx.db.tx():
-            self.ctx.db.execute(
+            ep = self.get(episode_id)
+            if ep is None or ep.status != "open":
+                return
+            events = self.events_of(episode_id)
+            now = self.ctx.clock.now()
+            if not events:
+                self.ctx.db.execute("DELETE FROM episodes WHERE id=? AND status='open'", (episode_id,))
+                return
+            centroid = self._centroid(episode_id)
+            first_user = next((e["text"] for e in events if e["speaker"] == "user"), events[0]["text"])
+            title = first_user.strip().replace("\n", " ")[:80]
+            importance = max(e["importance"] for e in events)
+            emotion = max((e["emotion"] for e in events), key=abs)
+            cur = self.ctx.db.execute(
                 "UPDATE episodes SET status='closed', end_ts=?, title=?, importance=?, emotion=?, event_count=?, "
-                "embedding=?, updated_at=? WHERE id=?",
+                "embedding=?, updated_at=? WHERE id=? AND status='open'",
                 (events[-1]["ts"], title, importance, emotion, len(events), to_blob(centroid), now, episode_id),
             )
+            if cur.rowcount == 0:
+                return
             self.ctx.fts_add("episode", episode_id, title)
             self.ctx.trace("episode", episode_id, "created", events[0]["ts"])
             self.ctx.audit.log("hippocampus", "close", "episode", episode_id, reason=reason)
@@ -142,7 +145,9 @@ class EpisodeStream:
             return "пауза"
         if ep.event_count >= cfg.episode_max_events:
             return "длина"
-        if obs.channel != ep.context.get("channel") and gap > 5 * 60:
+        # Смена канала делит разговор, только если сменил канал сам человек: события устройств
+        # и внутренние поводы идут своим каналом и не должны рвать живой разговор.
+        if obs.speaker == "user" and obs.channel != ep.context.get("channel") and gap > 5 * 60:
             return "смена канала"
         if obs.speaker == "user" and ep.event_count >= cfg.topic_shift_min_events:
             if ru.is_topic_shift(obs.text):

@@ -1,7 +1,10 @@
 """Сейф секретов: пароли и токены, которыми Джарвис пользуется, но которые не видит.
 
-В коде Джарвис пишет {{secret:имя}} — значение подставляется прямо перед выполнением,
-а из вывода вычищается (заменяется на ***). Ни в историю разговора, ни в память значения не попадают.
+Два способа (оба — только в момент запуска; в истории разговора и в памяти значений нет):
+  • {{secret:имя}} прямо в коде — подставляется перед выполнением (в Python — с экранированием для строки);
+  • переменная окружения JARVIS_SECRET_<ИМЯ> (os.environ["JARVIS_SECRET_WIFI"]) — удобно в навыках:
+    передаётся в процесс, если код (или импортированный навык) упоминает это имя.
+Из вывода значения вычищаются (заменяются на ***имя***).
 Сейф зашифрован (Fernet); ключ — JARVIS_VAULT_KEY (или создаётся в data/vault.key с правами 600).
 Секреты добавляет только человек — через отдельную команду канала (/secret имя значение), не через разговор.
 """
@@ -16,6 +19,16 @@ from pathlib import Path
 from cryptography.fernet import Fernet
 
 PLACEHOLDER = re.compile(r"\{\{\s*secret:([A-Za-z0-9_.\-]+)\s*\}\}")
+
+
+def env_name(name: str) -> str:
+    return "JARVIS_SECRET_" + re.sub(r"[^A-Za-z0-9]", "_", name).upper()
+
+
+def _py_escape(v: str) -> str:
+    """Значение, безопасное внутри любой строки Python ('…', "…", '''…''')."""
+    return (v.replace("\\", "\\\\").replace("'", "\\'").replace('"', '\\"')
+            .replace("\n", "\\n").replace("\r", "\\r"))
 
 
 class Vault:
@@ -55,8 +68,9 @@ class Vault:
     def names(self) -> list[str]:
         return sorted(self._load())
 
-    def fill(self, code: str) -> tuple[str, list[str], list[str]]:
-        """Подставить секреты. → (код, использованные имена, неизвестные имена)."""
+    def fill(self, code: str, *, python: bool = False) -> tuple[str, list[str], list[str]]:
+        """Подставить секреты. → (код, использованные имена, неизвестные имена).
+        python=True — значение экранируется для строкового литерала (кавычки и \\ не ломают код)."""
         data = self._load()
         used, missing = [], []
 
@@ -64,11 +78,23 @@ class Vault:
             name = m.group(1)
             if name in data:
                 used.append(name)
-                return data[name]
+                return _py_escape(data[name]) if python else data[name]
             missing.append(name)
             return m.group(0)
 
         return PLACEHOLDER.sub(sub, code), used, missing
+
+    def env_for(self, text: str) -> tuple[dict[str, str], list[str]]:
+        """Переменные JARVIS_SECRET_* для секретов, которые text упоминает по имени переменной.
+        → (окружение, имена)."""
+        data = self._load()
+        env, used = {}, []
+        for name, value in sorted(data.items()):
+            e = env_name(name)
+            if e in text:
+                env[e] = value
+                used.append(name)
+        return env, used
 
     def scrub(self, text: str, names: list[str] | None = None) -> str:
         """Вычистить значения секретов из текста (вывода программ)."""

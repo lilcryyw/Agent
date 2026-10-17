@@ -7,7 +7,8 @@
                        {"type":"result","id":..,"ok":..,"output":..,"image_b64":..}
                        {"type":"event","text":..,"trust":"observed"|"external"}  — что-то произошло на устройстве
   сервер → устройство: {"type":"welcome","device_id":..,"token":..}
-                       {"type":"call","id":..,"action":"run"|"screenshot"|"input","args":{..}}
+                       {"type":"call","id":..,"action":"run"|"screenshot"|"input"|"ui_tree","args":{..}}
+                       {"type":"cancel","id":..}  — остановить выполняющийся вызов («Джарвис, стоп»)
                        {"type":"say","text":..,"audio_b64":..}  — сказать вслух на устройстве (ответ или инициатива)
 Описание: name, kind, languages, capabilities. GET /client.py — скачать клиента (для подключения нового устройства).
 Токены хранятся только хешами; код подключения — одноразовый, живёт 15 минут.
@@ -150,7 +151,8 @@ class Gateway:
                 (device_id, owner, first.get("kind") or kind, name, _h(token), self.m.ctx.clock.now()))
             await ws.send(json.dumps({"type": "welcome", "device_id": device_id, "token": token}))
             info = self.m.ctx.db.one("SELECT * FROM devices WHERE id=?", (device_id,))
-            self._observe(owner, device_id, f"Подключено новое устройство «{name}» ({device_id}).", "observed")
+            await asyncio.to_thread(self._observe, owner, device_id,
+                                    f"Подключено новое устройство «{name}» ({device_id}).", "observed")
         elif first.get("type") == "hello":
             row = self.m.ctx.db.one("SELECT * FROM devices WHERE id=? AND revoked_at IS NULL",
                                     (str(first.get("device_id", "")),))
@@ -185,7 +187,10 @@ class Gateway:
                     asyncio.create_task(self._utterance(ws, info["owner"], device_id, msg))
                 elif msg.get("type") == "event":
                     trust = "external" if msg.get("trust") == "external" else "observed"
-                    self._observe(info["owner"], device_id, f"[{info['name']}] {str(msg.get('text', ''))[:2000]}", trust)
+                    # Запись в память считает смысловые векторы — не держим ради этого цикл событий.
+                    asyncio.create_task(asyncio.to_thread(
+                        self._observe, info["owner"], device_id, f"[{info['name']}] {str(msg.get('text', ''))[:2000]}",
+                        trust))
         except Exception:  # noqa: BLE001 — обрыв связи — обычное дело
             pass
         finally:
@@ -217,10 +222,11 @@ class Gateway:
                 log.exception("синтез речи не удался")
         await ws.send(json.dumps({"type": "say", "text": text, "audio_b64": audio}))
 
-    def say(self, person: str, text: str) -> bool:
-        """Сказать вслух на устройствах человека, где есть динамик. → было ли где сказать."""
+    def say(self, person: str, text: str, device: str | None = None) -> bool:
+        """Сказать вслух на устройствах человека, где есть динамик (или на одном — device). → было ли где сказать."""
         targets = [self._conns[d.id] for d in self.hub.all()
-                   if d.owner == person and "speaker" in d.capabilities and d.id in self._conns]
+                   if (d.id == device if device else d.owner == person) and "speaker" in d.capabilities
+                   and d.id in self._conns]
         if not targets or self.loop is None:
             return False
         for ws in targets:
@@ -241,6 +247,7 @@ class Gateway:
             return DeviceResult(False, "устройство не на связи")
         call_id = uuid.uuid4().hex
         fut = asyncio.get_running_loop().create_future()
+        fut.device_id = device_id  # type: ignore[attr-defined] — для отмены по устройству
         self._pending[call_id] = fut
         await ws.send(json.dumps({"type": "call", "id": call_id, "action": action, "args": args, "timeout": timeout}))
         try:
@@ -249,10 +256,32 @@ class Gateway:
             self._pending.pop(call_id, None)
             return DeviceResult(False, f"устройство не ответило за {timeout:.0f} с")
 
+    async def _cancel_device(self, device_id: str) -> None:
+        ws = self._conns.get(device_id)
+        for call_id, fut in list(self._pending.items()):
+            if getattr(fut, "device_id", None) != device_id:
+                continue
+            self._pending.pop(call_id, None)
+            if not fut.done():
+                fut.set_result(DeviceResult(False, "остановлено по просьбе человека"))
+            if ws is not None:
+                try:
+                    await ws.send(json.dumps({"type": "cancel", "id": call_id}))
+                except Exception:  # noqa: BLE001
+                    pass
+
     def _sync_call(self, device_id: str):
-        def call(action: str, args: dict, timeout: float) -> DeviceResult:
-            if self.loop is None:
-                return DeviceResult(False, "шлюз не запущен")
-            fut = asyncio.run_coroutine_threadsafe(self._call(device_id, action, args, timeout), self.loop)
-            return fut.result(timeout + 15)
-        return call
+        gw = self
+
+        class _Caller:
+            def __call__(self, action: str, args: dict, timeout: float) -> DeviceResult:
+                if gw.loop is None:
+                    return DeviceResult(False, "шлюз не запущен")
+                fut = asyncio.run_coroutine_threadsafe(gw._call(device_id, action, args, timeout), gw.loop)
+                return fut.result(timeout + 15)
+
+            def cancel(self) -> None:
+                if gw.loop is not None:
+                    asyncio.run_coroutine_threadsafe(gw._cancel_device(device_id), gw.loop)
+
+        return _Caller()

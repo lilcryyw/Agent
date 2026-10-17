@@ -35,6 +35,8 @@ class IntentionProposal(BaseModel):
     action: str = Field(description="Что сделать/напомнить, самодостаточно.")
     due: str | None = Field(description="Когда: YYYY-MM-DDTHH:MM по времени собеседника, если ясно; иначе null.")
     trigger: str = Field(description="Если не по времени — условие: «когда придёт домой», «когда позвонит мама».")
+    evidence: list[int] = Field(default_factory=list,
+                                description="Номера реплик [M..] человека, где он об этом попросил или пообещал.")
 
 
 class EpisodeEncoding(BaseModel):

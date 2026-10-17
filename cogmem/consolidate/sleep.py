@@ -8,6 +8,8 @@
   5. ставит напоминания о ближайших днях рождения и датах;
   6. пересобирает ядро-профиль.
 Каждый шаг идемпотентен: повторный запуск ничего не дублирует.
+Шаги изолированы: сбой ИИ на сводках не отменяет напоминания о днях рождения и пересборку ядра.
+Сводка, в период которой позже попал (или из которого удалён) эпизод, помечается stale и пересобирается.
 """
 
 from __future__ import annotations
@@ -44,6 +46,7 @@ VERIFY_SYSTEM = """Ты — проверяющий памяти Джарвиса
 «возможно, переедет» ≠ «переехал». Если частично — дай точную формулировку по репликам."""
 
 LEVELS = [("day", None), ("week", "day"), ("month", "day"), ("year", "month")]
+_UPPER = {"day": ["week", "month"], "week": [], "month": ["year"], "year": []}
 
 
 def _period_bounds(level: str, d: date, tz: ZoneInfo) -> tuple[str, datetime, datetime]:
@@ -92,22 +95,96 @@ class Sleep:
             return {}
         tz = ZoneInfo(p["timezone"])
         today = datetime.fromtimestamp(self.ctx.clock.now(), tz).date()
-        report = {"summaries": [], "links": 0, "verified": {}, "intentions": [], "core_changed": False}
+        report = {"summaries": [], "links": 0, "verified": {}, "intentions": [], "core_changed": False, "errors": []}
+
+        def step(name: str, fn, *args):
+            try:
+                report[name] = fn(*args)
+            except Exception as exc:  # noqa: BLE001 — один сбой не отменяет остальные шаги сна
+                log.exception("сон %s: шаг %s упал", person_id, name)
+                report["errors"].append(f"{name}: {type(exc).__name__}: {exc}"[:300])
+
         if self.llm is not None:
-            report["summaries"] = self._summaries(person_id, tz, today, max_days_catchup)
-            report["verified"] = self._reconcile(person_id, p["timezone"])
-        report["links"] = self._assoc_links(person_id, today, tz)
-        report["intentions"] = self._dates_to_intentions(person_id, tz, today)
+            step("summaries", self._summaries, person_id, tz, today, max_days_catchup)
+            step("verified", self._reconcile, person_id, p["timezone"])
+        step("links", self._assoc_links, person_id, today, tz)
+        step("intentions", self._dates_to_intentions, person_id, tz, today)
         before = self.core.version(person_id)
-        self.core.rebuild_profile(person_id, reason="сон")
+        step("core", self.core.rebuild_profile, person_id, "сон")
+        report.pop("core", None)
         report["core_changed"] = self.core.version(person_id) != before
         self.ctx.audit.log("sleep", "run", "person", None, after=report, reason=person_id)
         return report
 
     # --- 2. сводки ---
+    def mark_stale(self, person_id: str, ts: float, *, blank: bool = False) -> int:
+        """Сводки всех уровней, покрывающие момент ts, устарели (поздний эпизод или «забудь»).
+        blank=True — сразу стереть их содержимое (приватность), пересоберутся во «сне»."""
+        tzname = self.ctx.db.scalar("SELECT timezone FROM persons WHERE id=?", (person_id,)) or "Europe/Paris"
+        tz = ZoneInfo(tzname)
+        d = datetime.fromtimestamp(ts, tz).date()
+        n = 0
+        for level, _ in LEVELS:
+            key, _, _ = _period_bounds(level, d, tz)
+            row = self.ctx.db.one("SELECT id FROM episodes WHERE person_id=? AND level=? AND period_key=?",
+                                  (person_id, level, key))
+            if row is None:
+                continue
+            n += 1
+            if blank:
+                self.ctx.db.execute("UPDATE episodes SET stale=1, title='', gist='', embedding=NULL, updated_at=? "
+                                    "WHERE id=?", (self.ctx.clock.now(), row["id"]))
+                self.ctx.fts_remove("episode", row["id"])
+                self.ctx.index.remove("episode", row["id"])
+                self.ctx.db.execute("UPDATE memory_audit SET before=NULL, after=NULL WHERE unit_type='episode' "
+                                    "AND unit_id=?", (row["id"],))
+            else:
+                self.ctx.db.execute("UPDATE episodes SET stale=1 WHERE id=?", (row["id"],))
+        return n
+
+    def _children(self, person_id: str, level: str, s: datetime, e: datetime):
+        child_level = dict(LEVELS)[level] or "episode"
+        return self.ctx.db.query(
+            "SELECT id, title, gist, start_ts, importance FROM episodes WHERE person_id=? AND level=? "
+            "AND status='encoded' AND stale=0 AND start_ts>=? AND start_ts<? ORDER BY start_ts",
+            (person_id, child_level, s.timestamp(), e.timestamp()))
+
+    def _summarize(self, person_id: str, level: str, key: str, s: datetime, e: datetime, tz: ZoneInfo,
+                   existing_id: int | None) -> bool:
+        rows = self._children(person_id, level, s, e)
+        if not rows or (level != "day" and len(rows) < 2):
+            if existing_id is not None:  # материала больше нет (удалён) — сводка не нужна
+                self._drop_summary(existing_id)
+            return False
+        lines = [f"- {fmt_date(r['start_ts'], str(tz), with_time=level == 'day')} «{r['title']}»: {r['gist']}"
+                 for r in rows]
+        out = self.llm.parse(system=SUMMARY_SYSTEM, user=f"Период: {key}\n\n" + "\n".join(lines),
+                             schema=SummaryOut, purpose=f"summary_{level}")
+        self._store_summary(person_id, level, key, s, e, out, [r["id"] for r in rows], existing_id=existing_id)
+        return True
+
+    def _drop_summary(self, sid: int) -> None:
+        with self.ctx.db.tx():
+            self.ctx.db.execute("UPDATE episodes SET parent_id=NULL WHERE parent_id=?", (sid,))
+            self.ctx.db.execute("DELETE FROM links WHERE (src_type='episode' AND src_id=?) OR "
+                                "(dst_type='episode' AND dst_id=?)", (sid, sid))
+            self.ctx.db.execute("DELETE FROM episodes WHERE id=?", (sid,))
+            self.ctx.fts_remove("episode", sid)
+        self.ctx.index.remove("episode", sid)
+
     def _summaries(self, person_id: str, tz: ZoneInfo, today: date, catchup: int) -> list[str]:
         made = []
-        for level, child in LEVELS:
+        for level, _child in LEVELS:
+            # Устаревшие сводки этого уровня — пересобрать (независимо от окна догоняния).
+            for r in self.ctx.db.query("SELECT id, period_key, start_ts FROM episodes WHERE person_id=? AND level=? "
+                                       "AND stale=1 ORDER BY start_ts", (person_id, level)):
+                d = datetime.fromtimestamp(r["start_ts"], tz).date()
+                key, s, e = _period_bounds(level, d, tz)
+                try:
+                    if self._summarize(person_id, level, key, s, e, tz, existing_id=r["id"]):
+                        made.append(f"{level}:{key}")
+                except Exception:  # noqa: BLE001
+                    log.exception("пересборка сводки %s:%s", level, key)
             # Кандидаты-периоды: завершённые, где есть материал, но нет сводки.
             periods: dict[str, tuple[datetime, datetime]] = {}
             for back in range(1, catchup + 1 if level == "day" else 400):
@@ -122,33 +199,33 @@ class Sleep:
                 if self.ctx.db.one("SELECT 1 FROM episodes WHERE person_id=? AND level=? AND period_key=?",
                                    (person_id, level, key)):
                     continue
-                child_level = child or "episode"
-                rows = self.ctx.db.query(
-                    "SELECT id, title, gist, start_ts, importance FROM episodes WHERE person_id=? AND level=? "
-                    "AND status='encoded' AND start_ts>=? AND start_ts<? ORDER BY start_ts",
-                    (person_id, child_level, s.timestamp(), e.timestamp()))
-                if not rows or (level != "day" and len(rows) < 2):
-                    continue
-                lines = [f"- {fmt_date(r['start_ts'], str(tz), with_time=level == 'day')} «{r['title']}»: {r['gist']}"
-                         for r in rows]
-                out = self.llm.parse(system=SUMMARY_SYSTEM, user=f"Период: {key}\n\n" + "\n".join(lines),
-                                     schema=SummaryOut, purpose=f"summary_{level}")
-                self._store_summary(person_id, level, key, s, e, out, [r["id"] for r in rows])
-                made.append(f"{level}:{key}")
+                try:
+                    if self._summarize(person_id, level, key, s, e, tz, existing_id=None):
+                        made.append(f"{level}:{key}")
+                except Exception:  # noqa: BLE001 — сбой одной сводки не останавливает остальные
+                    log.exception("сводка %s:%s", level, key)
         return made
 
     def _store_summary(self, person_id: str, level: str, key: str, s: datetime, e: datetime, out: SummaryOut,
-                       child_ids: list[int]) -> None:
+                       child_ids: list[int], existing_id: int | None = None) -> None:
         now = self.ctx.clock.now()
         text = f"{out.title}. {out.gist}"
         vec = self.ctx.embed1(text)
         with self.ctx.db.tx():
-            sid = self.ctx.db.execute(
-                "INSERT INTO episodes(person_id, level, period_key, start_ts, end_ts, status, title, gist, importance, "
-                "visibility, event_count, embedding, created_at, updated_at) "
-                "VALUES (?,?,?,?,?,'encoded',?,?,?,'private',?,?,?,?)",
-                (person_id, level, key, s.timestamp(), e.timestamp() - 1, out.title.strip()[:120], out.gist.strip(),
-                 max(0.0, min(1.0, out.importance)), len(child_ids), to_blob(vec), now, now)).lastrowid
+            if existing_id is None:
+                sid = self.ctx.db.execute(
+                    "INSERT INTO episodes(person_id, level, period_key, start_ts, end_ts, status, title, gist, importance, "
+                    "visibility, event_count, embedding, created_at, updated_at) "
+                    "VALUES (?,?,?,?,?,'encoded',?,?,?,'private',?,?,?,?)",
+                    (person_id, level, key, s.timestamp(), e.timestamp() - 1, out.title.strip()[:120], out.gist.strip(),
+                     max(0.0, min(1.0, out.importance)), len(child_ids), to_blob(vec), now, now)).lastrowid
+            else:
+                sid = existing_id
+                self.ctx.db.execute(
+                    "UPDATE episodes SET title=?, gist=?, importance=?, event_count=?, embedding=?, stale=0, "
+                    "updated_at=? WHERE id=?",
+                    (out.title.strip()[:120], out.gist.strip(), max(0.0, min(1.0, out.importance)), len(child_ids),
+                     to_blob(vec), now, sid))
             self.ctx.db.execute(
                 f"UPDATE episodes SET parent_id=? WHERE id IN ({','.join('?' * len(child_ids))})", (sid, *child_ids))
             for cid in child_ids:
@@ -156,7 +233,12 @@ class Sleep:
                     "INSERT OR IGNORE INTO links(src_type, src_id, dst_type, dst_id, kind, weight, updated_at) "
                     "VALUES ('episode',?,'episode',?,'part_of',0.6,?)", (cid, sid, now))
             self.ctx.fts_add("episode", sid, text)
-            self.ctx.trace("episode", sid, "created", s.timestamp())
+            if existing_id is None:
+                self.ctx.trace("episode", sid, "created", s.timestamp())
+            elif _UPPER[level]:  # пересобранная сводка → и сводки уровнем выше устарели
+                self.ctx.db.execute(
+                    f"UPDATE episodes SET stale=1 WHERE person_id=? AND level IN ({','.join('?' * len(_UPPER[level]))}) "
+                    "AND start_ts<=? AND end_ts>=?", (person_id, *_UPPER[level], s.timestamp(), s.timestamp()))
         self.ctx.index.add("episode", sid, vec, owner=person_id, visibility="private", ts=s.timestamp())
 
     # --- 3. ассоциативные связи ---
@@ -196,7 +278,11 @@ class Sleep:
                 f"SELECT id, ts, speaker, text, source_kind FROM events WHERE id IN ({','.join('?' * len(ids))}) "
                 "ORDER BY ts", tuple(ids))
             if not evs:
-                continue  # реплики удалены по просьбе человека — сверять не с чем
+                # Реплики удалены по просьбе человека — сверять не с чем; отметим, чтобы такие факты
+                # не занимали каждую ночь всю выборку сверки.
+                self.ctx.audit.log("sleep", "verify", "fact", f.id, after={"verdict": "no_source"})
+                stats["no_source"] = stats.get("no_source", 0) + 1
+                continue
             lines = [f"[M{e['id']}] {fmt_date(e['ts'], tz, True)} "
                      f"{'человек' if e['speaker'] == 'user' else 'Джарвис' if e['speaker'] == 'assistant' else e['speaker']}"
                      f"{' [внешний]' if e['source_kind'] == 'external' else ''}: {e['text']}" for e in evs]

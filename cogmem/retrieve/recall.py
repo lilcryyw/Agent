@@ -3,13 +3,16 @@
 Источники кандидатов (параллельно по смыслу):
   1) векторный поиск (смысл), 2) полнотекстовый по основам слов (точные слова, имена, числа),
   3) граф ассоциаций (PageRank от упомянутых сущностей), 4) эпизоды из названного периода.
-Оценка = релевантность × активация (ACT-R) × важность × граф × контекст.
+Оценка = взвешенная сумма (релевантность, активация ACT-R, важность, граф, контекст), но
+сначала — шлюз релевантности: несвязанное с подсказкой не проходит, как бы оно ни было
+важно или свежо (иначе каждый ход в промпт сыпалось всё недавнее и «важное»).
 Шлюз чтения: чужая личная память отсекается до ранжирования (в индексе и в SQL).
 """
 
 from __future__ import annotations
 
 import json
+import math
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -29,7 +32,7 @@ from cogmem.types import Recalled
 _META_SQL = {
     "fact": "SELECT id, statement AS text, recorded_at AS ts, importance, owner_person AS owner, visibility, "
             "(invalidated_at IS NULL AND status='active') AS active, valid_from, valid_to, invalidated_at, "
-            "source_kind, confidence, subject_id, superseded_by, NULL AS episode_id FROM facts WHERE id IN ({})",
+            "source_kind, confidence, subject_id, superseded_by, status, NULL AS episode_id FROM facts WHERE id IN ({})",
     "episode": "SELECT id, title, gist, start_ts AS ts, end_ts, importance, person_id AS owner, visibility, "
                "1 AS active, level, period_key, context, status, id AS episode_id FROM episodes WHERE id IN ({})",
     "event": "SELECT id, text, ts, importance, person_id AS owner, visibility, 1 AS active, episode_id, speaker, "
@@ -140,6 +143,8 @@ class Retriever:
                 continue
             if not m["active"] and not (history and key[0] == "fact"):
                 continue
+            if key[0] == "fact" and m.get("status") == "rejected":
+                continue  # отвергнутое (ложное) не показываем даже в истории
             if key[0] == "event" and exclude_episode_id is not None and m["episode_id"] == exclude_episode_id:
                 continue  # текущий разговор и так в контексте
             if key[0] == "episode" and (m.get("status") == "open" or key[1] == exclude_episode_id):
@@ -159,6 +164,15 @@ class Retriever:
         c_hi = max(cvals) if cvals else 1.0
         span = (c_hi - c_lo) or 1.0
         acts = base_levels(self.ctx, list(ok))
+        # У реплик нет следа «создано» в журнале обращений — учитываем момент самой реплики,
+        # иначе свежая реплика «тусклее» любой, которую хоть раз показали.
+        d = cfg.decay_d
+        for key, m in ok.items():
+            if key[0] == "event" and m["ts"]:
+                b = acts.get(key, -12.0)
+                acc = (math.exp(b) if b > -12.0 else 0.0) + max(1.0, now - m["ts"]) ** (-d)
+                acts[key] = math.log(acc)
+        habit = self._habituation(list(ok), now)
 
         # Эпизоды, из которых выведены факты, позже заменённые новыми: помечаем «устарело частично».
         ep_ids = [k_[1] for k_ in ok if k_[0] == "episode"] + [m["episode_id"] for k_, m in ok.items()
@@ -168,7 +182,7 @@ class Retriever:
             ph = ",".join("?" * len(ep_ids))
             stale_eps = {r["source_episode_id"] for r in self.ctx.db.query(
                 f"SELECT DISTINCT source_episode_id FROM facts WHERE invalidated_at IS NOT NULL "
-                f"AND source_episode_id IN ({ph})", tuple(ep_ids))}
+                f"AND (visibility='family' OR owner_person=?) AND source_episode_id IN ({ph})", (viewer, *ep_ids))}
 
         ctx_dev = (context or {}).get("device")
         ctx_ch = (context or {}).get("channel")
@@ -185,13 +199,19 @@ class Retriever:
             in_period = False
             if time_range is not None:
                 if key[0] == "fact":
-                    vf, vt = m["valid_from"] or 0.0, m["valid_to"] or float("inf")
-                    in_period = (vf < time_range.end and vt > time_range.start) or time_range.contains(ts)
+                    # Факт «о периоде» — если в нём что-то началось/закончилось или он тогда записан.
+                    # Просто «верный и тогда» (без дат) — нейтрален: раньше любой факт без дат считался
+                    # «из периода», получал +0.25 и обходил порог — «сегодня» в вопросе = все факты в промпт.
+                    edges = [x for x in (m["valid_from"], m["valid_to"], ts) if x]
+                    in_period = any(time_range.contains(x) for x in edges)
+                    if in_period:
+                        rel = min(1.0, rel + 0.25)
                 elif key[0] == "episode":
                     in_period = ts < time_range.end and (m["end_ts"] or ts) >= time_range.start
                 else:
                     in_period = time_range.contains(ts)
-                rel = min(1.0, rel + 0.25) if in_period else rel * 0.6
+                if key[0] != "fact":
+                    rel = min(1.0, rel + 0.25) if in_period else rel * 0.6
             act = squash(acts.get(key, -12.0), cfg.activation_tau)
             g = ppr.get(key, 0.0)
             cm = 0.0
@@ -204,16 +224,55 @@ class Retriever:
                 score *= 0.8  # устаревшее — ниже, но в режиме истории видно
             if key[0] == "fact" and m["source_kind"] == "external":
                 score *= 0.85
+            score *= habit.get(key, 1.0)
             text = self._text(key[0], m, tz)
             if key[0] == "episode" and key[1] in stale_eps:
                 text += " [часть сведений отсюда УСТАРЕЛА — см. актуальные факты]"
+            elif key[0] == "event" and m.get("episode_id") in stale_eps:
+                text += " [возможно, устарело — см. актуальные факты]"
             scored.append(Recalled(key[0], key[1], text, ts, score, rel, act, imp, g, cm,
                                    episode_id=m.get("episode_id"), extra={"meta": m, "in_period": in_period}))
 
-        min_score = cfg.min_score * (0.7 if deep else 1.0)
-        scored = [r for r in scored if r.score >= min_score or (time_range is not None and r.extra["in_period"])]
+        # Шлюз релевантности: абсолютный порог и порог относительно лучшего кандидата запроса.
+        # Проходят без него: эпизоды/реплики из названного периода, упомянутые сущности
+        # и то, к чему сильно ведёт граф от упомянутых людей/мест.
+        def exempt(r: Recalled) -> bool:
+            return (r.extra["in_period"] and r.unit_type != "fact") or r.graph >= cfg.graph_keep or \
+                (r.unit_type == "entity" and r.unit_id in seeds)
+
+        best = max((r.relevance for r in scored if not exempt(r)), default=0.0)
+        soft = 0.7 if deep else 1.0
+        rel_floor = max(cfg.min_relevance * soft, cfg.relative_relevance * soft * best)
+        min_score = cfg.min_score * soft
+        scored = [r for r in scored if exempt(r) or (r.relevance >= rel_floor and r.score >= min_score)]
         scored.sort(key=lambda r: -r.score)
         return RecallResult(scored, time_range, seeds, len(cands), (time.perf_counter() - t0) * 1000)
+
+    def _habituation(self, keys: list[tuple[str, int]], now: float) -> dict[tuple[str, int], float]:
+        """Привыкание: то, что недавно много раз показывали и ни разу не использовали, — ниже.
+
+        Без этого «показано» само себя подкрепляет: след «извлечено» поднимает активацию,
+        и та же ненужная мелочь снова попадает в промпт в каждом новом разговоре.
+        """
+        h = self.ctx.cfg.habituation
+        if not keys or h <= 0:
+            return {}
+        since = now - self.ctx.cfg.habituation_days * 86400
+        by_type: dict[str, list[int]] = {}
+        for t, i in keys:
+            by_type.setdefault(t, []).append(i)
+        out: dict[tuple[str, int], float] = {}
+        for t, ids in by_type.items():
+            for start in range(0, len(ids), 500):
+                chunk = ids[start : start + 500]
+                for r in self.ctx.db.query(
+                    "SELECT unit_id, SUM(kind='retrieved') AS shown, SUM(kind='used') AS used FROM access_traces "
+                    f"WHERE unit_type=? AND ts>=? AND unit_id IN ({','.join('?' * len(chunk))}) GROUP BY unit_id",
+                    (t, since, *chunk)):
+                    idle = max(0, int(r["shown"] or 0) - 3 * int(r["used"] or 0))
+                    if idle:
+                        out[(t, r["unit_id"])] = 1.0 / (1.0 + h * idle)
+        return out
 
     # --- текст единиц для показа ИИ ---
     def _text(self, t: str, m: dict, tz: str) -> str:
@@ -223,6 +282,8 @@ class Retriever:
                 bits.append(f"с {fmt_date(m['valid_from'], tz)}")
             if m["invalidated_at"]:
                 bits.append(f"УСТАРЕЛО с {fmt_date(m['valid_to'] or m['invalidated_at'], tz)}")
+            elif m.get("status") == "pending_review":
+                bits.append("НЕ ПОДТВЕРЖДЕНО — не считать верным")
             src = {"user_stated": "со слов", "assistant": "сказал Джарвис", "observed": "наблюдение",
                    "inferred": "вывод", "external": "внешний источник"}.get(m["source_kind"], m["source_kind"])
             bits.append(f"{src}, записано {fmt_date(m['ts'], tz)}, уверенность {m['confidence']:.1f}")
