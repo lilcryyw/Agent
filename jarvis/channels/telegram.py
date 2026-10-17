@@ -98,7 +98,10 @@ async def run(j: Jarvis | None = None) -> None:
         f = await bot.get_file((msg.voice or msg.audio).file_id)
         data = (await bot.download_file(f.file_path)).read()
         try:
-            heard = await asyncio.to_thread(j.voice.transcribe, data)
+            pcm = await asyncio.to_thread(j.voice.pcm16k, data)
+            heard = await asyncio.to_thread(j.voice.transcribe, data, pcm=pcm)
+            if heard:
+                j.enroll_voice(pid, pcm)  # личный Telegram: голос точно этого человека
             if not heard:
                 await msg.answer("Не расслышал, повтори, пожалуйста.")
                 return

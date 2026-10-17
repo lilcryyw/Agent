@@ -113,7 +113,10 @@ class Api:
                     if u.path == "/api/voice":
                         if api.voice is None:
                             return self._json(501, {"error": "голос не настроен на сервере"})
-                        heard = api.voice.transcribe(body)
+                        pcm = api.voice.pcm16k(body)
+                        heard = api.voice.transcribe(body, pcm=pcm)
+                        if heard and hasattr(api.j, "enroll_voice"):
+                            api.j.enroll_voice(person, pcm)  # личный канал: голос точно этого человека
                         if not heard:
                             return self._json(200, {"heard": "", "reply": "Не расслышал, повтори, пожалуйста."})
                         r = api.j.brain.handle(person, heard, channel="voice", device=device)

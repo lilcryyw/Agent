@@ -49,10 +49,15 @@ class Voice:
             self._stt = onnx_asr.load_model(STT_MODEL)
         return self._stt
 
-    def transcribe(self, audio: bytes) -> str:
+    @staticmethod
+    def pcm16k(audio: bytes) -> bytes:
+        """Любой аудиоформат → PCM 16 кГц моно int16 (для распознавания и узнавания голоса)."""
+        return ffmpeg(audio, ["-ar", "16000", "-ac", "1", "-f", "s16le"])
+
+    def transcribe(self, audio: bytes, *, pcm: bytes | None = None) -> str:
         """Любой аудиоформат → текст."""
         # ffmpeg в поток пишет WAV без длины — берём «сырой» звук и собираем WAV сами.
-        pcm = ffmpeg(audio, ["-ar", "16000", "-ac", "1", "-f", "s16le"])
+        pcm = pcm if pcm is not None else self.pcm16k(audio)
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
             with wave.open(f, "wb") as w:
                 w.setnchannels(1)

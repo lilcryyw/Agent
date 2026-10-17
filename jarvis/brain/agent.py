@@ -123,10 +123,11 @@ class Brain:
     def _lock(self, person_id: str) -> threading.Lock:
         return self._locks.setdefault(person_id, threading.Lock())
 
-    def handle(self, person_id: str, text: str, *, channel: str = "text", device: str | None = None) -> TurnResult:
-        """Реплика человека."""
+    def handle(self, person_id: str, text: str, *, channel: str = "text", device: str | None = None,
+               note: str | None = None) -> TurnResult:
+        """Реплика человека. note — служебная пометка для контекста (например, «голос не узнан уверенно»)."""
         with self._lock(person_id):
-            return self._turn(person_id, text, origin="user", channel=channel, device=device)
+            return self._turn(person_id, text, origin="user", channel=channel, device=device, note=note)
 
     def handle_stimulus(self, person_id: str, reason: str) -> TurnResult:
         """Внутренний повод (цель, срок, событие): Джарвис сам решает, действовать ли и говорить ли."""
@@ -138,7 +139,8 @@ class Brain:
         month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp()
         return self.memory.spend_usd(month_start) >= self.s.monthly_budget_usd
 
-    def _turn(self, person_id: str, text: str, *, origin: str, channel: str, device: str | None) -> TurnResult:
+    def _turn(self, person_id: str, text: str, *, origin: str, channel: str, device: str | None,
+              note: str | None = None) -> TurnResult:
         mem = self.memory
         if origin == "user":
             obs = mem.observe(Observation(person_id, text, speaker="user", channel=channel, device=device))
@@ -184,6 +186,8 @@ class Brain:
         trust = self.tools.keys.trust_suggestions(person_id)
         state = ("Ключи от замка: " + ("; ".join(keys) if keys else "нет") + "."
                  + (" Доверие: " + "; ".join(trust) + "." if trust else ""))
+        if note:
+            state += f" {note}"
         blocks.append({"type": "text", "text": f"<контекст>Сейчас: {human_now(now)} ({now.tzinfo}). {where} {state}"
                                               f"</контекст>\n<память>\n{wm.render()}\n</память>"})
         blocks.append({"type": "text", "text": text if origin == "user"

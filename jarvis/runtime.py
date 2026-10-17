@@ -64,6 +64,7 @@ class Jarvis:
         self.brain = Brain(m, self.s, client, self.tools)
         self._notifiers: list[Notifier] = []
         self.initiative = Initiative(m, m.llm, self.brain.handle_stimulus, self._notify)
+        self.speakers = self._make_speakers(data)
         self.api = None
         if self.gateway is not None:
             # Сказанное Джарвисом по своей инициативе звучит и на устройствах с динамиком.
@@ -72,13 +73,59 @@ class Jarvis:
         self._last_sleep: dict[str, str] = {}
         self._last_initiative = 0.0
 
+    def _make_speakers(self, data: Path):
+        if self.voice is None:
+            return None
+        try:
+            import sherpa_onnx  # noqa: F401
+        except Exception:  # noqa: BLE001
+            return None
+        from jarvis.voice.speakers import Speakers
+
+        return Speakers(self.memory, data / "models")
+
+    def enroll_voice(self, person_id: str, pcm: bytes) -> None:
+        """Пассивная запись голоса из личного канала (фоном, ошибки не мешают разговору)."""
+        if self.speakers is None:
+            return
+
+        def job():
+            try:
+                self.speakers.enroll(person_id, pcm)
+            except Exception:  # noqa: BLE001
+                log.exception("не удалось записать голосовой отпечаток")
+
+        threading.Thread(target=job, daemon=True).start()
+
+    def who_speaks(self, owner: str, pcm: bytes) -> tuple[str, str | None]:
+        """Кто говорит на устройстве владельца owner → (person_id, пометка для контекста)."""
+        if self.speakers is None:
+            return owner, None
+        try:
+            m = self.speakers.identify(pcm)
+        except Exception:  # noqa: BLE001
+            log.exception("узнавание голоса не удалось")
+            return owner, None
+        if m.person_id and self.memory.person(m.person_id):
+            if m.person_id == owner:
+                return owner, None
+            name = self.memory.person(m.person_id)["name"]
+            return m.person_id, f"Говорит {name} (узнан(а) по голосу) с чужого устройства."
+        if self.speakers.profiles():
+            owner_name = self.memory.person(owner)["name"]
+            return owner, (f"Голос не узнан уверенно — возможно, говорит не {owner_name}, а гость. "
+                           "Не раскрывай личное, пока не убедишься, кто это.")
+        return owner, None
+
     def _device_utterance(self, owner: str, device_id: str, audio: bytes) -> tuple[str, str]:
         if self.voice is None:
             return "", "Голос на сервере не настроен."
-        heard = self.voice.transcribe(audio)
+        pcm = self.voice.pcm16k(audio)
+        heard = self.voice.transcribe(audio, pcm=pcm)
         if not heard:
             return "", ""
-        return heard, self.brain.handle(owner, heard, channel="voice", device=device_id).text
+        person, note = self.who_speaks(owner, pcm)
+        return heard, self.brain.handle(person, heard, channel="voice", device=device_id, note=note).text
 
     def _devices_urls(self) -> str:
         urls = [self.s.devices_url] if self.s.devices_url else []

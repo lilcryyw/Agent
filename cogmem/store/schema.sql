@@ -313,3 +313,12 @@ CREATE TABLE IF NOT EXISTS api_tokens (
     created_at  REAL NOT NULL,
     revoked_at  REAL
 );
+
+-- Голосовые отпечатки: узнавать, кто говорит на общем устройстве. Копятся сами из личных каналов.
+CREATE TABLE IF NOT EXISTS voiceprints (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    person_id   TEXT NOT NULL,
+    embedding   BLOB NOT NULL,
+    created_at  REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_voiceprints_person ON voiceprints(person_id);

@@ -13,7 +13,10 @@ from jarvis.channels.http_api import Api, create_token
 
 
 class FakeVoice:
-    def transcribe(self, audio):
+    def pcm16k(self, audio):
+        return audio
+
+    def transcribe(self, audio, pcm=None):
         return audio.decode()
 
     def speak(self, text, fmt):
