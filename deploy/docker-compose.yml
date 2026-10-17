@@ -1,4 +1,5 @@
-# Запуск на VPS:  cp ../.env.example ../.env && nano ../.env && docker compose up -d --build
+# Запуск на VPS:  cp ../.env.example ../.env && nano ../.env && docker compose --env-file ../.env up -d --build
+# (--env-file обязателен: из него берутся JARVIS_DOMAIN и JARVIS_WORKSHOP_TOKEN для подстановки ниже)
 services:
   jarvis:
     build:
