@@ -62,8 +62,10 @@ class Jarvis:
         m.encoder = EpisodeEncoder(m.ctx, m.llm, m.entities, m.facts, m.episodes, m.retriever)
         m.sleeper = Sleep(m.ctx, m.llm, m.facts, m.core, m.intentions)
         m.add_person(self.s.owner_id, self.s.owner_name, role="owner", timezone=self.s.owner_timezone)
+        m.rename_person(self.s.owner_id, self.s.owner_name)  # имя в настройках поменялось — помним новое
         for pid, (name, role, tz) in self.s.people.items():
             m.add_person(pid, name, role=role, timezone=_valid_tz(tz))
+            m.rename_person(pid, name)
 
         self.workshop = workshop or workshop_from_env()
         self.skills = SkillBank(m, self.workshop, data / "skills")

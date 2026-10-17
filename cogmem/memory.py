@@ -117,6 +117,29 @@ class CognitiveMemory:
             (person_id, name, role, timezone, eid, self.ctx.clock.now()))
         self.core.rebuild_profile(person_id, reason="создание")
 
+    def rename_person(self, person_id: str, name: str) -> bool:
+        """Новое имя человека (например, настройка поменялась): имя, схема-сущность, прозвища, профиль."""
+        p = self.person(person_id)
+        if p is None or not name or p["name"] == name:
+            return False
+        from cogmem.text import ru
+
+        db = self.ctx.db
+        with db.tx():
+            db.execute("UPDATE persons SET name=? WHERE id=?", (name, person_id))
+            if p["entity_id"]:
+                db.execute("UPDATE entities SET name=?, updated_at=? WHERE id=?",
+                           (name, self.ctx.clock.now(), p["entity_id"]))
+                old = ru.alias_norm(p["name"])
+                if old:
+                    db.execute("DELETE FROM aliases WHERE entity_id=? AND alias_norm=?", (p["entity_id"], old))
+        if p["entity_id"]:
+            self.entities.add_alias(p["entity_id"], name)
+            self.entities._alias_cache = None
+        self.ctx.audit.log("system", "rename", "person", 0, reason=f"{p['name']} → {name}")
+        self.core.rebuild_profile(person_id, reason="новое имя")
+        return True
+
     def person(self, person_id: str) -> dict | None:
         r = self.ctx.db.one("SELECT * FROM persons WHERE id=?", (person_id,))
         return dict(r) if r else None
