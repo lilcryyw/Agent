@@ -53,7 +53,9 @@ class Voice:
             import onnx_asr
 
             log.info("загружаю модель распознавания %s", STT_MODEL)
-            self._stt = onnx_asr.load_model(STT_MODEL)
+            # JARVIS_STT_QUANT=int8 — сжатая модель: ~550 МБ памяти вместо ~1 ГБ, точность почти та же.
+            quant = os.environ.get("JARVIS_STT_QUANT") or None
+            self._stt = onnx_asr.load_model(STT_MODEL, quantization=quant) if quant else onnx_asr.load_model(STT_MODEL)
         return self._stt
 
     @staticmethod
