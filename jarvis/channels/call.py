@@ -139,7 +139,7 @@ class CallServer:
         try:
             make_segmenter(self.models_dir)
             if self.voice is not None and hasattr(self.voice, "speak_wav"):
-                self.voice.transcribe(b"", pcm=b"\0\0" * RATE // 2)
+                self.voice.transcribe(b"", pcm=b"\0\0" * (RATE // 2))
                 self.voice.speak_wav("Готов.")
         except Exception:  # noqa: BLE001
             log.exception("прогрев моделей речи не удался")

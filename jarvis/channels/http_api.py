@@ -45,6 +45,13 @@ def create_token(memory, person_id: str, name: str = "") -> str:
     return token
 
 
+def ensure_token(memory, person_id: str, token: str, name: str = "владелец") -> None:
+    """Заранее известный ключ (например, из секретов площадки) — чтобы войти без Telegram."""
+    if token and person_for_token(memory, token) is None:
+        memory.ctx.db.execute("INSERT INTO api_tokens(token_hash, person_id, name, created_at) VALUES (?,?,?,?)",
+                              (_h(token), person_id, name, memory.ctx.clock.now()))
+
+
 def person_for_token(memory, token: str) -> str | None:
     row = memory.ctx.db.one("SELECT person_id FROM api_tokens WHERE token_hash=? AND revoked_at IS NULL",
                             (_h(token),))

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -39,6 +40,8 @@ class Jarvis:
 
             client = anthropic.Anthropic()
         data = Path(self.s.db_path).parent if self.s.db_path != ":memory:" else Path("data")
+        # Модели речи можно держать вне папки данных (в образе), чтобы не копировать их в резервную копию.
+        self.models_dir = Path(os.environ.get("JARVIS_MODELS_DIR") or data / "models")
         m = self.memory = CognitiveMemory(self.s.db_path, embedder=embedder, clock=clock)
         m.llm = subconscious or AnthropicStructuredLLM(client, model=self.s.subconscious_model,
                                                        effort=self.s.subconscious_effort, usage_sink=m.record_usage)
@@ -52,7 +55,7 @@ class Jarvis:
         self.skills = SkillBank(m, self.workshop, data / "skills")
         self.keys = KeyRing(m)
         self.devices = DeviceHub()
-        self.voice = self._make_voice(data)
+        self.voice = self._make_voice(self.models_dir)
         self.gateway = Gateway(m, self.devices, port=self.s.devices_port, on_utterance=self._device_utterance,
                                tts=(lambda t: self.voice.speak(t, "wav")[0]) if self.voice else None) \
             if self.s.devices_port else None
@@ -64,10 +67,9 @@ class Jarvis:
         self.brain = Brain(m, self.s, client, self.tools)
         self._notifiers: list[Notifier] = []
         self.initiative = Initiative(m, m.llm, self.brain.handle_stimulus, self._notify)
-        self.speakers = self._make_speakers(data)
+        self.speakers = self._make_speakers(self.models_dir)
         self.api = None
         self.call = None
-        self._data = data
         if self.gateway is not None:
             # Сказанное Джарвисом по своей инициативе звучит и на устройствах с динамиком.
             self.on_notify(lambda person, text: self.gateway.say(person, text))
@@ -75,7 +77,7 @@ class Jarvis:
         self._last_sleep: dict[str, str] = {}
         self._last_initiative = 0.0
 
-    def _make_speakers(self, data: Path):
+    def _make_speakers(self, models: Path):
         if self.voice is None:
             return None
         try:
@@ -84,7 +86,7 @@ class Jarvis:
             return None
         from jarvis.voice.speakers import Speakers
 
-        return Speakers(self.memory, data / "models")
+        return Speakers(self.memory, models)
 
     def enroll_voice(self, person_id: str, pcm: bytes) -> None:
         """Пассивная запись голоса из личного канала (фоном, ошибки не мешают разговору)."""
@@ -136,7 +138,7 @@ class Jarvis:
         return ",".join(urls)
 
     @staticmethod
-    def _make_voice(data: Path):
+    def _make_voice(models: Path):
         try:
             import onnx_asr  # noqa: F401
             import piper  # noqa: F401
@@ -144,7 +146,7 @@ class Jarvis:
             return None
         from jarvis.voice import Voice
 
-        return Voice(data / "models")
+        return Voice(models)
 
     def on_notify(self, fn: Notifier) -> None:
         self._notifiers.append(fn)
@@ -209,7 +211,7 @@ class Jarvis:
         if self.s.call_port and self.voice is not None and self.call is None:
             from jarvis.channels.call import CallServer
 
-            self.call = CallServer(self, port=self.s.call_port, voice=self.voice, models_dir=self._data / "models")
+            self.call = CallServer(self, port=self.s.call_port, voice=self.voice, models_dir=self.models_dir)
             self.call.start()
             log.info("живой разговор слушает порт %s", self.call.port)
 

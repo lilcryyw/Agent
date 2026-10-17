@@ -167,3 +167,29 @@ def test_call_conversation_and_barge_in(server):
         got, _ = recv_until(ws, "done")  # перебившая фраза стала следующей репликой
         assert seen[-1][1] == "Стоп, подожди"
         assert "перебили" in seen[-1][2]["note"]
+
+
+def test_backup_snapshot_restores_memory(tmp_path):
+    import io
+    import sqlite3
+    import tarfile
+
+    from jarvis.persist import snapshot
+
+    data = tmp_path / "data"
+    (data / "models").mkdir(parents=True)
+    (data / "models" / "big.onnx").write_bytes(b"0" * 1000)
+    (data / "skills").mkdir()
+    (data / "skills" / "SKILL.md").write_text("навык")
+    db = sqlite3.connect(data / "jarvis.db")
+    db.execute("PRAGMA journal_mode=WAL")
+    db.execute("CREATE TABLE t(x)")
+    db.execute("INSERT INTO t VALUES ('мама любит пионы')")
+    db.commit()  # база открыта и в режиме WAL — как у работающего Джарвиса
+    blob = snapshot(data)
+    out = tmp_path / "restored"
+    with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as tar:
+        names = tar.getnames()
+        tar.extractall(out, filter="data")
+    assert "models/big.onnx" not in names and "skills/SKILL.md" in names
+    assert sqlite3.connect(out / "jarvis.db").execute("SELECT x FROM t").fetchone()[0] == "мама любит пионы"

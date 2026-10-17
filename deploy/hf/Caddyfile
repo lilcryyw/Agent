@@ -1,0 +1,22 @@
+# Всё через один порт (так требуют Hugging Face Spaces и туннель Cloudflare): HTTPS снаружи делает площадка.
+{
+    auto_https off
+    admin off
+}
+:{$PORT:7860} {
+    handle /devices* {
+        reverse_proxy 127.0.0.1:8765
+    }
+    handle /call* {
+        reverse_proxy 127.0.0.1:8790
+    }
+    handle /api* {
+        reverse_proxy 127.0.0.1:8780
+    }
+    handle /app* {
+        reverse_proxy 127.0.0.1:8780
+    }
+    handle {
+        redir * /app/ 302
+    }
+}
