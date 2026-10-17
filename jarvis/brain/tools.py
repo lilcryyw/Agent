@@ -31,7 +31,19 @@ from jarvis.workshop import Workshop
 
 
 def _schema(props: dict[str, Any]) -> dict:
-    return {"type": "object", "properties": props, "required": sorted(props), "additionalProperties": False}
+    """Схема инструмента. Необязательные параметры — не в required и без union-типа «X | null»:
+    некоторые провайдеры (прокси ProxyAPI) ограничивают число таких параметров (≤16 на запрос).
+    Код инструментов читает их через .get(), поэтому отсутствие значения безопасно."""
+    out: dict[str, Any] = {}
+    required: list[str] = []
+    for k, v in props.items():
+        if isinstance(v.get("type"), list):
+            base = next(t for t in v["type"] if t != "null")
+            out[k] = {**v, "type": base}
+        else:
+            out[k] = v
+            required.append(k)
+    return {"type": "object", "properties": out, "required": sorted(required), "additionalProperties": False}
 
 
 S = {"type": "string"}
@@ -131,8 +143,6 @@ TOOLS: list[dict] = [
     {"name": "skill_search", "description": "Найти среди своих навыков подходящие для задачи.",
      "input_schema": _schema({"query": S})},
 ]
-for _t in TOOLS:
-    _t["strict"] = True
 TOOLS.sort(key=lambda t: t["name"])
 
 # Признаки удаления личных данных в командах для устройств (страховка, если effects не указан).
