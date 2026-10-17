@@ -82,3 +82,18 @@ def test_client_download_endpoint(gw):
     g, hub, mem = gw
     body = urllib.request.urlopen(f"http://127.0.0.1:{g.port}/devices/client.py", timeout=10).read().decode()
     assert "Клиент Джарвиса" in body
+
+
+def test_client_falls_back_to_relay_address(gw, tmp_path):
+    g, hub, mem = gw
+    good = f"ws://127.0.0.1:{g.port}/devices"
+    code = g.create_pairing("owner", "linux")
+    cmd, env = client(tmp_path, "--server", good, "--pair", code, "--once")
+    assert subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=30).returncode == 0
+    dead = "ws://127.0.0.1:9/devices"  # «заблокированный» основной адрес
+    cmd, env = client(tmp_path, "--server", f"{dead},{good}")
+    proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        assert wait(lambda: hub.all(), timeout=20), "не переключился на запасной адрес"
+    finally:
+        proc.kill()

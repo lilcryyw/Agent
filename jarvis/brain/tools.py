@@ -66,6 +66,12 @@ TOOLS: list[dict] = [
     {"name": "device_screen",
      "description": "Посмотреть экран устройства (снимок). Дальше — device_input. Для того, у чего нет API.",
      "input_schema": _schema({"device": S})},
+    {"name": "family",
+     "description": "Семья (только владелец). op: list — кто есть; add — добавить человека (person_id латиницей, "
+                    "name, timezone вроде Europe/Samara); app_link — ссылка на голосовое веб-приложение для человека "
+                    "(с личным ключом; есть вариант через ретранслятор в России); revoke_links — отозвать его ключи.",
+     "input_schema": _schema({"op": {"type": "string", "enum": ["list", "add", "app_link", "revoke_links"]},
+                              "person_id": SN, "name": SN, "timezone": SN})},
     {"name": "goal",
      "description": "Цели — то, что ты доводишь до конца за несколько шагов/дней. op: add | update | done | drop. "
                     "next_check_local — когда вернуться к цели ('YYYY-MM-DDTHH:MM' по времени человека).",
@@ -124,10 +130,12 @@ DELETE_RE = re.compile(r"(rm\s+-[a-z]*r|Remove-Item[^\n]*-Recurse|shutil\.rmtree
 
 class ToolBox:
     def __init__(self, memory: CognitiveMemory, *, workshop: Workshop, skills: SkillBank, keys: KeyRing,
-                 devices: DeviceHub, vault: Vault, pairing: Any = None, devices_url: str = ""):
+                 devices: DeviceHub, vault: Vault, pairing: Any = None, devices_url: str = "",
+                 domains: list[str] | None = None):
         self.m = memory
         self.pairing = pairing          # (owner, kind) → код; None — шлюз устройств не запущен
-        self.devices_url = devices_url  # wss://сервер/devices
+        self.devices_url = devices_url  # wss://сервер/devices[,wss://ретранслятор/devices]
+        self.domains = domains or []    # [основной домен, ретранслятор]
         self.ws = workshop
         self.skills = skills
         self.keys = keys
@@ -263,6 +271,8 @@ class ToolBox:
             return self._input(person, a)
         if name == "device_pair":
             return self._pair(person, a["kind"], a.get("for_person"))
+        if name == "family":
+            return self._family(person, a)
         return f"Нет такого органа: {name}", True
 
     def _device_for(self, person: str, device_id: str, effects: list[str], target: str | None):
@@ -303,6 +313,50 @@ class ToolBox:
                              after={"device": dev.id, "action": a["action"], "ok": res.ok})
         return res.output, not res.ok
 
+    def _family(self, person: str, a: dict):
+        import re as _re
+
+        from jarvis.channels.http_api import create_token
+
+        p = self.m.person(person)
+        if not p or p["role"] != "owner":
+            return "Управлять семьёй может только владелец.", True
+        op = a["op"]
+        if op == "list":
+            rows = self.m.ctx.db.query("SELECT id, name, role, timezone FROM persons ORDER BY created_at")
+            return "\n".join(f"- {r['id']}: {r['name']} ({r['role']}, {r['timezone']})" for r in rows), False
+        pid = (a.get("person_id") or "").strip().lower()
+        if not _re.fullmatch(r"[a-z][a-z0-9_]{1,30}", pid):
+            return "person_id — латиницей, например mama, papa, sister.", True
+        if op == "add":
+            if self.m.person(pid):
+                return f"{pid} уже есть.", False
+            from zoneinfo import ZoneInfo
+
+            tz = a.get("timezone") or "Europe/Moscow"
+            try:
+                ZoneInfo(tz)
+            except Exception:  # noqa: BLE001
+                return f"Неизвестный часовой пояс {tz}.", True
+            self.m.add_person(pid, a.get("name") or pid, role="family", timezone=tz)
+            return f"Добавлен(а): {pid} — {a.get('name') or pid}, {tz}. Теперь можно выдать ссылку (app_link).", False
+        if self.m.person(pid) is None:
+            return f"Нет человека {pid}.", True
+        if op == "app_link":
+            if not self.domains:
+                return "Домен сервера не настроен (JARVIS_DOMAIN).", True
+            token = create_token(self.m, pid, f"ссылка от {person}")
+            links = [f"https://{d}/app/#t={token}" for d in self.domains]
+            out = f"Ссылка для {pid}: {links[0]}"
+            if len(links) > 1:
+                out += f"\nЕсли из России не открывается — через ретранслятор: {links[1]}"
+            return out + "\nОткрыть в браузере телефона → «Поделиться» → «На экран Домой». Ссылка личная.", False
+        if op == "revoke_links":
+            n = self.m.ctx.db.execute("UPDATE api_tokens SET revoked_at=? WHERE person_id=? AND revoked_at IS NULL",
+                                      (self.m.ctx.clock.now(), pid)).rowcount
+            return f"Отозвано ключей: {n}.", False
+        return "Неизвестная операция.", True
+
     def _pair(self, person: str, kind: str, for_person: str | None):
         owner = for_person or person
         if owner != person:
@@ -313,7 +367,8 @@ class ToolBox:
             return "Шлюз устройств не настроен (JARVIS_DEVICES_URL). Без него устройство не подключить.", True
         code = self.pairing(owner, kind)
         url = self.devices_url.rstrip("/")
-        http = url.replace("wss://", "https://").replace("ws://", "http://") + "/client.py"
+        first = url.split(",")[0].strip().rstrip("/")
+        http = first.replace("wss://", "https://").replace("ws://", "http://") + "/client.py"
         run = f'--server {url} --pair {code} --install'
         steps = {
             "windows": ("В PowerShell:\n"

@@ -187,8 +187,9 @@ async def main_async(args) -> None:
     if args.pair:
         from websockets.asyncio.client import connect
 
-        local = any(h in server for h in ("localhost", "127.0.0.1"))
-        async with connect(server, max_size=16 * 1024 * 1024, proxy=None if local else True) as ws:
+        first_server = server.split(",")[0].strip()
+        local = any(h in first_server for h in ("localhost", "127.0.0.1"))
+        async with connect(first_server, max_size=16 * 1024 * 1024, proxy=None if local else True) as ws:
             await ws.send(json.dumps({"type": "pair", "code": args.pair, "name": name, **info}))
             welcome = json.loads(await ws.recv())
         if welcome.get("type") != "welcome":
@@ -200,16 +201,19 @@ async def main_async(args) -> None:
         print(install_autostart())
     if args.once:
         return
-    delay = 2
+    servers = [x.strip() for x in server.split(",") if x.strip()]  # основной, затем запасные (ретранслятор)
+    delay, i = 2, 0
     while True:
+        server = servers[i % len(servers)]
         try:
             await session(server, {"type": "hello", "device_id": cfg["device_id"], "token": cfg["token"],
                                    "name": name, **info})
             delay = 2
         except PermissionError as e:
             raise SystemExit(f"Сервер отказал: {e}. Подключите устройство заново (--pair).")
-        except Exception as e:  # noqa: BLE001 — нет сети: ждём и пробуем снова
-            print(f"нет связи ({type(e).__name__}), повтор через {delay} с", file=sys.stderr)
+        except Exception as e:  # noqa: BLE001 — нет сети: пробуем следующий адрес
+            print(f"нет связи с {server} ({type(e).__name__}), повтор через {delay} с", file=sys.stderr)
+            i += 1
         await asyncio.sleep(delay)
         delay = min(delay * 2, 60)
 
@@ -248,7 +252,7 @@ def install_autostart() -> str:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Клиент устройства Джарвиса")
-    ap.add_argument("--server", help="wss://сервер/devices")
+    ap.add_argument("--server", help="wss://сервер/devices (можно несколько через запятую: основной,ретранслятор)")
     ap.add_argument("--pair", help="одноразовый код подключения от Джарвиса")
     ap.add_argument("--name", help="как назвать устройство")
     ap.add_argument("--install", action="store_true", help="запускаться автоматически")

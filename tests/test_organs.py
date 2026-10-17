@@ -129,3 +129,19 @@ def test_workshop_has_no_api_keys(box, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-should-not-leak")
     out, err = tb.run("owner", "run_code", code_args("import os\nprint('ANTHROPIC_API_KEY' in os.environ)"))
     assert "False" in out
+
+
+def test_family_management_owner_only(box):
+    tb, mem, calls, ev = box
+    tb.domains = ["jarvis.example.com", "ru.jarvis.example.com"]
+    out, err = tb.run("owner", "family", {"op": "add", "person_id": "papa", "name": "Пётр", "timezone": "Europe/Moscow"})
+    assert not err and mem.person("papa")["timezone"] == "Europe/Moscow"
+    out, err = tb.run("owner", "family", {"op": "app_link", "person_id": "papa", "name": None, "timezone": None})
+    assert not err and "https://jarvis.example.com/app/#t=jv_" in out and "ru.jarvis.example.com" in out
+    from jarvis.channels.http_api import person_for_token
+    token = out.split("#t=")[1].split()[0]
+    assert person_for_token(mem, token) == "papa"
+    tb.run("owner", "family", {"op": "revoke_links", "person_id": "papa", "name": None, "timezone": None})
+    assert person_for_token(mem, token) is None
+    out, err = tb.run("mama", "family", {"op": "list", "person_id": None, "name": None, "timezone": None})
+    assert err  # не владелец

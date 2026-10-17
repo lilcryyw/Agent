@@ -49,6 +49,8 @@ class Settings:
     # Шлюз устройств: порт WebSocket и внешний адрес (за Caddy с HTTPS), например wss://jarvis.example.com/devices
     devices_port: int = 8765
     devices_url: str = ""
+    relay_domain: str = ""         # ретранслятор в России (например ru.jarvis.example.com)
+    public_domain: str = ""        # основной домен
     api_port: int = 8780           # HTTP-API для iPhone/веб (0 — выключено)
 
     @classmethod
@@ -74,6 +76,8 @@ class Settings:
         s.devices_port = int(e.get("JARVIS_DEVICES_PORT", s.devices_port))
         s.devices_url = e.get("JARVIS_DEVICES_URL", s.devices_url)
         s.api_port = int(e.get("JARVIS_API_PORT", s.api_port))
+        s.relay_domain = e.get("JARVIS_RELAY_DOMAIN", s.relay_domain)
+        s.public_domain = e.get("JARVIS_DOMAIN", s.public_domain)
         people = e.get("JARVIS_PEOPLE", "")  # «mama:Ольга Петровна:family:Europe/Samara;papa:...»
         for item in filter(None, (p.strip() for p in people.split(";"))):
             parts = [x.strip() for x in item.split(":")]

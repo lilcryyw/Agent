@@ -56,7 +56,8 @@ class Jarvis:
         self.vault = Vault(data / "vault.bin")
         self.tools = ToolBox(m, workshop=self.workshop, skills=self.skills, keys=self.keys, devices=self.devices,
                              vault=self.vault, pairing=self.gateway.create_pairing if self.gateway else None,
-                             devices_url=self.s.devices_url)
+                             devices_url=self._devices_urls(), domains=[d for d in (self.s.public_domain,
+                                                                                     self.s.relay_domain) if d])
         self.brain = Brain(m, self.s, client, self.tools)
         self._notifiers: list[Notifier] = []
         self.initiative = Initiative(m, m.llm, self.brain.handle_stimulus, self._notify)
@@ -65,6 +66,12 @@ class Jarvis:
         self._stop = threading.Event()
         self._last_sleep: dict[str, str] = {}
         self._last_initiative = 0.0
+
+    def _devices_urls(self) -> str:
+        urls = [self.s.devices_url] if self.s.devices_url else []
+        if self.s.relay_domain:
+            urls.append(f"wss://{self.s.relay_domain}/devices")
+        return ",".join(urls)
 
     @staticmethod
     def _make_voice(data: Path):

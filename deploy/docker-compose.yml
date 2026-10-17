@@ -9,6 +9,7 @@ services:
       JARVIS_DB: /app/data/jarvis.db
       JARVIS_WORKSHOP_URL: http://workshop:8700
       JARVIS_DEVICES_URL: wss://${JARVIS_DOMAIN}/devices
+      JARVIS_DOMAIN: ${JARVIS_DOMAIN}
     volumes:
       - ../data:/app/data            # память, навыки, сейф, кэш модели смыслов (бэкапить эту папку!)
     depends_on: [workshop]

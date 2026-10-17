@@ -1,0 +1,13 @@
+# На российском VPS (Timeweb, Selectel, Yandex Cloud…):
+#   RELAY_DOMAIN=ru.jarvis.example.com JARVIS_DOMAIN=jarvis.example.com docker compose up -d
+services:
+  relay:
+    image: caddy:2
+    ports: ["80:80", "443:443"]
+    environment:
+      RELAY_DOMAIN: ${RELAY_DOMAIN}
+      JARVIS_DOMAIN: ${JARVIS_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy-data:/data
+    restart: unless-stopped
