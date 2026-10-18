@@ -198,3 +198,23 @@ export function makeUnique(r) {
     default: return { n: `Наградной портсигар, ${year} г.`, v: 50 + Math.floor(r() * 60), w: 0.2 };
   }
 }
+
+export const ICONS = {
+  tushenka: '🥫', sgush: '🥛', suhari: '🍞', grechka: '🌾', kilka: '🐟', lapsha: '🍜', kartoshka: '🥔', varenye: '🍯', med_honey: '🍯',
+  salo: '🥓', voda: '💧', syhpay: '🎒', griby: '🍄', bint: '🩹', zelenka: '🧪', aptechka: '🩺', antibio: '💊', obezbol: '💊', spirt: '🧴',
+  x7: '💉', kanistra: '⛽', bochka: '🛢️', zapchasti: '⚙️', instrument: '🧰', akkum: '🔋', maslo: '🫙', list: '🔩', kabel: '🧶',
+  pm: '🔫', toz: '🔫', bizon: '🔫', ak: '🔫', svd: '🔫', vodka: '🍾', sigarety: '🚬', spichki: '🔥', svechi: '🕯️', sol: '🧂', sahar: '🍬',
+  batareyki: '🔋', semena: '🌱', fonar: '🔦', valenki: '🥾', ushanka: '🧢', protivogaz: '😷', binokl: '🔭', benzopila: '🪚', generator: '⚡',
+  kniga: '📕', samovar: '🫖', garmon: '🪗', ikona: '🖼️', chasy: '⌚', medal: '🎖️', radio: '📻', kassetnik: '📼', plastinka: '💿', zenit: '📷',
+  matreshka: '🪆', hohloma: '🥣', monety: '🪙', zoloto: '📿', globus: '🌍', shahmaty: '♟️', balalayka: '🎸',
+};
+export function itemDesc(id) {
+  const it = ITEMS[id]; if (!it) return '';
+  if (it.food) return `Сытость +${it.food}`;
+  if (it.cure) return `Лечит укус, здоровье +${it.hp}`;
+  if (it.hp) return `Здоровье +${it.hp}`;
+  if (it.fuel) return `${it.fuel} л солярки в бак`;
+  if (it.repair) return `Ремонт поезда +${it.repair}%`;
+  if (it.weapon) { const w = WEAPONS[id]; return `Урон ${w.dmg}${w.pellets > 1 ? '×' + w.pellets : ''}, дальность ${w.range} м, патроны ${AMMO[w.ammo].n}`; }
+  return it.c === 'valuable' ? 'Ценность — хорошо идёт на обмен' : 'Товар для обмена';
+}

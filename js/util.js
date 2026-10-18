@@ -42,8 +42,10 @@ export function worldPos(s, d, h = 0, v = new THREE.Vector3()) {
 }
 // приблизительно обратное: мировая точка -> (s, d)
 export function toTrack(x, z, o = {}) {
-  const s = -z; frameAt(s, _f);
-  o.s = s; o.d = (x - _f.x) * _f.nx; return o;
+  let s = -z;
+  for (let k = 0; k < 2; k++) { frameAt(s, _f); s += (x - _f.x) * -Math.sin(_f.yaw) + (z - _f.z) * -Math.cos(_f.yaw); }
+  frameAt(s, _f);
+  o.s = s; o.d = (x - _f.x) * _f.nx + (z - _f.z) * _f.nz; return o;
 }
 
 // ---------- текстуры и материалы

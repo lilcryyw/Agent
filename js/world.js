@@ -4,7 +4,8 @@ import {
   gableGeo, QuadBatch, ribbon, sign, disposeTree,
 } from './util.js';
 import { NAMES_F, NAMES_N, NAMES_PL, NAMES_M, MOD, SETTLEMENT_NAMES, FACTORIES } from './data.js';
-import { makeBoxcar, makeTank, makeHuman, makeCar } from './models.js';
+import { makeBoxcar, makeTank, makeCar } from './models.js';
+import { Char } from './chars.js';
 
 export const CHUNK = 100;
 const AHEAD = 6, BEHIND = 2;
@@ -139,6 +140,22 @@ export class World {
     for (const o of ch.obs) this.obstacles.delete(o.id);
     this.chunks.delete(i);
   }
+  // вытолкнуть точку из построек (в координатах пути)
+  collide(s, d, rad = 0.4) {
+    const ch = this.chunks.get(Math.floor(s / CHUNK)), out = { s, d, hit: false };
+    for (const c of [ch, this.chunks.get(Math.floor(s / CHUNK) - 1), this.chunks.get(Math.floor(s / CHUNK) + 1)]) {
+      if (!c) continue;
+      for (const b of c.solids) {
+        if (out.s > b[0] - rad && out.s < b[1] + rad && out.d > b[2] - rad && out.d < b[3] + rad) {
+          const e = [out.s - (b[0] - rad), b[1] + rad - out.s, out.d - (b[2] - rad), b[3] + rad - out.d];
+          const m = Math.min(...e), i = e.indexOf(m);
+          if (i === 0) out.s = b[0] - rad; else if (i === 1) out.s = b[1] + rad; else if (i === 2) out.d = b[2] - rad; else out.d = b[3] + rad;
+          out.hit = true;
+        }
+      }
+    }
+    return out;
+  }
   removeObstacle(o) { this.cleared.add(o.id); this.obstacles.delete(o.id); o.mesh.parent && o.mesh.parent.remove(o.mesh); disposeTree(o.mesh); }
 
   _build(ci) {
@@ -147,7 +164,7 @@ export class World {
     const O = new THREE.Vector3(trackX(s0), 0, -s0);
     const g = new THREE.Group(); g.position.copy(O);
     const ctx = { ci, s0, s1, r, O, g, zone: this.zoneAt(s0 + 50), season: this.seasonAt(s0 + 50), region: this.regionAt(s0 + 50),
-      occ: [], bands: [], li: 0, loot: [], obs: [] };
+      occ: [], bands: [], li: 0, loot: [], obs: [], solids: [] };
     ctx.bands.push([-8, 8]);
     this._ground(ctx);
     this._trackAt(ctx, 0, s0, s1);
@@ -159,7 +176,7 @@ export class World {
     this._extras(ctx);
     this._trees(ctx);
     this.scene.add(g);
-    this.chunks.set(ci, { g, loot: ctx.loot, obs: ctx.obs });
+    this.chunks.set(ci, { g, loot: ctx.loot, obs: ctx.obs, solids: ctx.solids });
   }
 
   // ---------- размещение
@@ -190,6 +207,7 @@ export class World {
   put(ctx, b, s, d, sgn) {
     this.place(ctx, b.g, s, d, -sgn * HALF_PI);
     this.occupy(ctx, s, d, b.w, b.d);
+    if (b.d > 1.5 && b.w > 1.5) ctx.solids.push([s - b.w / 2, s + b.w / 2, d - b.d / 2, d + b.d / 2]);
     if (b.loot) this.regLoot(ctx, b, s, d, sgn);
   }
   one(ctx, sgn, dNear, key) {
@@ -439,9 +457,8 @@ export class World {
     }
     const people = RI(r, 1, 4);
     for (let i = 0; i < people; i++) {
-      const h = makeHuman({ skin: pick(r, [0xe0b89a, 0xd0a080, 0xc89878]), shirt: pick(r, [0x4a5a3a, 0x3a4a5a, 0x6a4a3a, 0x2a2a2a, 0x7a2a2a]),
-        pants: pick(r, [0x2a2a2a, 0x3a3a4a, 0x4a4a3a]), hat: r() < 0.4 ? 0x3a3a3a : null });
-      h.rA.rotation.x = -0.3; h.lA.rotation.x = 0.2;
+      const h = new Char(r() < 0.6 ? 'soldier' : 'woman', 'clean');
+      h.mixer.setTime(r() * 3); h.mixer.update(0.01);
       this.place(ctx, h.root, R(r, ctx.s0 + 5, ctx.s1 - 5), sgn * R(r, 3, wallD - 2), R(r, -1, 1), st && st.side === sgn && Math.abs(st.s - ctx.s0 - 50) < st.len / 2 ? 1.1 : 0);
     }
     if (st && st.s >= ctx.s0 && st.s < ctx.s1 && st.side === sgn) {
