@@ -55,13 +55,13 @@ export class Player {
     this.hand.add(g); this.gun = g;
   }
   climb(path, mode, dur) { this.tween = { path, mode, dur, t: 0, st: 0 }; this.root.visible = true; this.crouch = false; }
-  roofY(train, off) {
+  roofY(train, off, d = 0) {
     let o = 0;
     for (const c of train.cars) {
       const a = -o, b = -o - c.len;
       if (off <= a + 0.3 && off >= b - 0.3) {
         const local = -(off - (a - c.len / 2));
-        return c.roofY(local) + 0.64;
+        return c.roofY(local, d) + 0.64;
       }
       o += c.len + 0.6;
     }
@@ -84,10 +84,10 @@ export class Player {
       T.st += dt; if (T.st > (vert ? 0.4 : 0.45)) { T.st = 0; this.onStep && this.onStep(vert ? 'metal' : 'auto', 0.8); }
       if (k >= 1) {
         this.tween = null; this.mode = T.mode;
-        if (T.mode === 'roof') { toTrack(this.pos.x, this.pos.z, _t); this.off = _t.s - train.s; this.d = clamp(_t.d, -1.15, 1.15); }
+        if (T.mode === 'roof' || T.mode === 'inside') { toTrack(this.pos.x, this.pos.z, _t); this.off = _t.s - train.s; this.d = clamp(_t.d, -1.15, 1.15); }
         if (T.mode === 'cab') this.root.visible = false;
       }
-    } else if (this.mode === 'ground' || this.mode === 'roof') {
+    } else if (this.mode === 'ground' || this.mode === 'roof' || this.mode === 'inside') {
       const m = Math.min(1, Math.hypot(inp.jx, inp.jy));
       const cy = inp.camYaw, fx = -Math.sin(cy), fz = -Math.cos(cy), rx = Math.cos(cy), rz = -Math.sin(cy);
       let mx = 0, mz = 0;
@@ -107,12 +107,19 @@ export class Player {
         const c = world.collide(s, d, 0.4); if (c.hit) { s = c.s; d = c.d; moved = true; }
         if (moved) worldPos(s, d, 0, this.pos);
         this.pos.y = groundH(s, d);
+      } else if (this.mode === 'inside') {
+        frameAt(train.s + this.off, _f);
+        const Fx = -Math.sin(_f.yaw), Fz = -Math.cos(_f.yaw);
+        const r = train.insideCollide(this.off + (mx * Fx + mz * Fz) * sp * dt, this.d + (mx * _f.nx + mz * _f.nz) * sp * dt);
+        this.off = clamp(r.off, -(train.length - 0.8), -0.5); this.d = r.d;
+        const ci = train.carAt(this.off);
+        this.trainPoint(train, this.off, this.d, ((ci && ci.c.floor) || 1.3) + 0.64, this.pos);
       } else {
         frameAt(train.s + this.off, _f);
         const Fx = -Math.sin(_f.yaw), Fz = -Math.cos(_f.yaw);
         this.off = clamp(this.off + (mx * Fx + mz * Fz) * sp * dt, -(train.length - 1.0), -1.2);
         this.d = clamp(this.d + (mx * _f.nx + mz * _f.nz) * sp * dt, -1.15, 1.15);
-        this.trainPoint(train, this.off, this.d, this.roofY(train, this.off), this.pos);
+        this.trainPoint(train, this.off, this.d, this.roofY(train, this.off, this.d), this.pos);
       }
       if (sp > 0 && this.aimT <= 0) this.yaw = turn(this.yaw, Math.atan2(-mx, -mz), dt * 10);
       // шаги

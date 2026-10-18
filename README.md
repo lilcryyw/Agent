@@ -59,7 +59,11 @@ https://mertvy-peregon.pages.dev — открыть в Safari на iPhone → «
 - `js/world.js` — генерация мира по участкам 100 м, `js/models.js` — 3D-модели, `js/train.js` — физика поезда и пневматика, `js/zombies.js` — зомби, `js/audio.js` — звук (настоящие записи, объёмный звук), `js/packs.js` — загрузка готовых моделей, `js/data.js` — предметы, лут, названия, `js/main.js` — игровой цикл.
 - `vendor/three.module.min.js` — three.js 0.169.
 - `assets/models` — модели людей из примеров three.js (персонажи Mixamo); текстуры зомби рисуются из них в игре (трупные пятна, кровь).
-- `assets/models/train_pack.*`, `nature_pack.*` — низкополигональные модели поездов и природы [Quaternius](https://quaternius.com) (CC0), сконвертированы в компактный формат.
+- `js/rolling.js` — свой пассажирский поезд: тепловоз по мотивам ТЭП70 и плацкартный вагон с салоном (полки, столики, тамбуры), куда можно зайти.
+- `js/viewmodel.js` — оружие в руках при виде от первого лица.
+- `assets/models/zombie.glb` — зомби «Male City Zombie» с анимациями (OpenGameArt, CC0).
+- `assets/models/guns_pack.*` — оружие из Ultimate Gun Pack [Quaternius](https://quaternius.com) (CC0).
+- `assets/models/train_pack.*`, `nature_pack.*` — брошенные грузовые вагоны и природа [Quaternius](https://quaternius.com) (CC0), сконвертированы в компактный формат.
 - `assets/tex` — PBR-текстуры (цвет + карта нормалей) и небо HDRI с [Poly Haven](https://polyhaven.com) (CC0).
 - `assets/sfx` — записи: поезда, тормоза, воздух, сцепки, гудок — [The Red Library](https://archive.org/details/RedLibrary) (CC0); шаги, удары, предметы — [Kenney](https://kenney.nl) (CC0); зомби и оружие — [OpenGameArt](https://opengameart.org) (CC0).
 - `sw.js` и `manifest.webmanifest` — установка на экран «Домой» и офлайн-режим.

@@ -5,11 +5,6 @@ import { M, C, P, B, boxGeo, boxAt, cylGeo, merge, shared, QuadBatch, sign, pick
 // ---------- поезд из готовых моделей (Quaternius Train Pack, CC0), перекрашен под РЖД
 export const TS = 1.62;            // масштаб моделей до габарита 1520
 const HP = Math.PI / 2;
-function ladderMesh(h, x, z) {
-  const p = [cylGeo(0.03, 0.03, h, 6).translate(x, h / 2 + 0.6, z - 0.22), cylGeo(0.03, 0.03, h, 6).translate(x, h / 2 + 0.6, z + 0.22)];
-  for (let y = 0.9; y < h + 0.5; y += 0.4) p.push(cylGeo(0.022, 0.022, 0.44, 5).rotateX(HP).translate(x, y, z));
-  return new THREE.Mesh(merge(p), P(0xc8c4b4, 40));
-}
 function carFrom(model, o) {
   const geo = packGeo(model, Object.assign({ rotY: -HP, scale: TS }, o));
   const g = new THREE.Group();
@@ -17,46 +12,7 @@ function carFrom(model, o) {
   const bb = geo.boundingBox, len = bb.max.z - bb.min.z;
   return { g, geo, len, H: bb.max.y, W: bb.max.x, roof: roofProfile(geo) };
 }
-// 2ТЭ116-образный: зелёный с жёлтой полосой
-export function makeLoco() {
-  const c = carFrom('CargoTrain_Front', { colors: { Main: 0x3e7d56, DarkMain: 0xe0b33a, Grey: 0x8a9096, DarkGrey: 0x4a4f52 } });
-  const { g, len } = c, F = -len / 2, Bk = len / 2;
-  for (const f of [1, -1]) { const l = ladderMesh(c.roof.at(Bk - 0.6) - 0.6, f * (c.W + 0.04), Bk - 0.6); g.add(l); }
-  const up = {};
-  const plowM = M('rusty_metal_02', 0x9a9a9a);
-  const plow = new THREE.Group();
-  const p1 = new THREE.Mesh(boxGeo(2.1, 1.2, 0.12, 1.5), plowM); p1.position.set(-0.78, 0.6, F - 0.9); p1.rotation.y = -0.62; plow.add(p1);
-  const p2 = new THREE.Mesh(boxGeo(2.1, 1.2, 0.12, 1.5), plowM); p2.position.set(0.78, 0.6, F - 0.9); p2.rotation.y = 0.62; plow.add(p2);
-  g.add(plow); up.plow = plow;
-  const armor = new THREE.Mesh(merge([boxAt(0.08, 1.2, len * 0.6, -c.W - 0.06, 2.4, len * 0.12, 1.5), boxAt(0.08, 1.2, len * 0.6, c.W + 0.06, 2.4, len * 0.12, 1.5)]), M('rusty_metal_02', 0x8a8a8a));
-  g.add(armor); up.armor = armor;
-  const roofF = c.roof.at(F + 3.2);
-  const sl = new THREE.Group();
-  sl.add(new THREE.Mesh(shared(new THREE.CylinderGeometry(0.32, 0.36, 0.5, 14).rotateX(HP)), P(0x444444, 30)));
-  const slGlass = new THREE.Mesh(shared(new THREE.CircleGeometry(0.3, 16)), B(0xfffbe0)); slGlass.position.z = -0.26; slGlass.rotation.y = Math.PI; sl.add(slGlass);
-  sl.position.set(0.7, roofF + 0.35, F + 3.2); g.add(sl); up.light = sl;
-  const tur = makeTurret(); tur.position.set(0, c.roof.at(Bk - 3) , Bk - 3); g.add(tur); up.turret = tur;
-  // фары
-  const lampY = 2.3;
-  const small = shared(new THREE.CylinderGeometry(0.1, 0.1, 0.1, 12).rotateX(HP));
-  for (const x of [-0.85, 0.85]) {
-    const l = new THREE.Mesh(small, B(0xfff6d8)); l.position.set(x, 1.25, F + 0.12); g.add(l);
-    const r = new THREE.Mesh(small, B(0xc02020)); r.position.set(x, 1.25, Bk - 0.05); g.add(r);
-  }
-  const roofY = (z) => c.roof.at(z);
-  return { g, wheels: [], up, len, roofY, lampPos: new THREE.Vector3(0, lampY, F - 0.1),
-    cabCam: new THREE.Vector3(0.45, 3.6, F + 0.55), gunPos: new THREE.Vector3(1.0, 3.2, F + 1.6),
-    spots: { door: F + 3.3, ladder: Bk - 0.6, top: Bk - 1.6 } };
-}
 const BOX_COL = [0x8a4632, 0x7a3e2c, 0x6e4a36, 0x93533a, 0x5e5048];
-// крытый вагон (свой поезд)
-export function makeBoxcar(r) {
-  const col = pick(r, BOX_COL);
-  const c = carFrom('Locomotive_Wagon', { colors: { LightWood: col, DarkWood: 0x3a2a22, Grey: 0x6f7377 } });
-  const Bk = c.len / 2;
-  for (const f of [1, -1]) c.g.add(ladderMesh(c.roof.at(Bk - 0.5) - 0.6, f * (c.W + 0.04), Bk - 0.5));
-  return { g: c.g, wheels: [], len: c.len, roofY: (z) => c.roof.at(z), spots: { ladder: Bk - 0.5, top: Bk - 1.5 } };
-}
 // брошенные вагоны на запасных путях — разные модели
 const ABANDON = [
   ['Locomotive_Wagon', 'Брошенный крытый вагон', 4],
@@ -99,16 +55,6 @@ export function makeTank(r) {
 const PACK_MAT_DARK = new THREE.MeshStandardMaterial({ color: 0x262626, roughness: 0.8 });
 
 
-function makeTurret() {
-  const t = new THREE.Group();
-  const bags = new THREE.Mesh(shared(new THREE.CylinderGeometry(1.0, 1.1, 0.7, 10)), C(0x8a7a55));
-  bags.position.y = 0.35; t.add(bags);
-  const gun = new THREE.Group(); gun.position.y = 0.95;
-  gun.add(new THREE.Mesh(boxAt(0.18, 0.2, 0.7, 0, 0, 0, 1), C(0x1e1e1e)));
-  gun.add(new THREE.Mesh(shared(new THREE.CylinderGeometry(0.035, 0.035, 1.0, 6).rotateX(Math.PI / 2).translate(0, 0.02, -0.8)), C(0x111111)));
-  t.add(gun); t.userData.gun = gun;
-  return t;
-}
 
 
 // ---------- человекоподобные фигуры (зомби, выжившие, игрок)

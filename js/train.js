@@ -1,10 +1,11 @@
 import * as THREE from '../vendor/three.module.min.js';
-import { makeLoco, makeBoxcar, makeTank } from './models.js';
+import { makeTank } from './models.js';
+import { makePassLoco, makePassCar } from './rolling.js';
 import { worldPos, clamp, mulberry32 } from './util.js';
 
 export const BRAKE_NAMES = ['I', 'II', 'III', 'IV', 'V', 'VI'];
 export const BRAKE_HINT = ['Зарядка', 'Поездное', 'Перекрыша', 'Перекрыша без питания', 'Служебное', 'Экстренное'];
-const LOCO_MASS = 138000, G = 9.81;
+const LOCO_MASS = 135000, G = 9.81;
 const _a = new THREE.Vector3(), _b = new THREE.Vector3();
 
 export class Train {
@@ -28,17 +29,17 @@ export class Train {
   get kmh() { return this.v * 3.6; }
   get length() { return this.cars.reduce((a, c) => a + c.len + 0.6, 0); }
   get sRear() { return this.s - this.length; }
-  mass() { return LOCO_MASS + this.wagons * 24000 + (this.up.tank ? 28000 : 0) + this.cargoKg + this.fuel * 0.84; }
+  mass() { return LOCO_MASS + this.wagons * 52000 + (this.up.tank ? 28000 : 0) + this.cargoKg + this.fuel * 0.84; }
 
   build() {
     for (const c of this.cars) { this.scene.remove(c.g); }
     this.cars = [];
-    const loco = makeLoco();
+    const loco = makePassLoco();
     this.loco = loco;
-    const add = (m, kind) => this.cars.push({ g: m.g, wheels: m.wheels, len: m.len, kind, roofY: m.roofY, spots: m.spots });
+    const add = (m, kind) => this.cars.push({ g: m.g, wheels: m.wheels, len: m.len, kind, roofY: m.roofY, spots: m.spots, rects: m.rects, floor: m.floor });
     add(loco, 'loco');
     if (this.up.tank) add(makeTank(this.rng), 'tank');
-    for (let i = 0; i < this.wagons; i++) add(makeBoxcar(this.rng), 'box');
+    for (let i = 0; i < this.wagons; i++) add(makePassCar(i + 1), 'pass');
     for (const c of this.cars) this.scene.add(c.g);
     for (const k of ['plow', 'armor', 'light', 'turret']) loco.up[k].visible = !!this.up[k];
     this.place(0);
@@ -57,6 +58,42 @@ export class Train {
       c.s0 = this.s - off; c.s1 = this.s - off - c.len;
       off += c.len + 0.6;
     }
+  }
+
+  // вагон по смещению от головы поезда; local z — координата в вагоне (перёд −Z)
+  carAt(off) {
+    let o = 0;
+    for (const c of this.cars) {
+      if (off <= -o + 0.3 && off >= -o - c.len - 0.3) return { c, z: (-o - c.len / 2) - off, center: -o - c.len / 2 };
+      o += c.len + 0.6;
+    }
+    return null;
+  }
+  // ходьба в салоне: вытолкнуть точку из полок, перегородок и стен
+  insideCollide(off, d, rad = 0.24) {
+    let o = 0, x = d, hit = false;
+    let res = { off, d };
+    for (const c of this.cars) {
+      const center = -o - c.len / 2; o += c.len + 0.6;
+      let z = center - res.off;
+      if (z < -c.len / 2 - 1.2 || z > c.len / 2 + 1.2) continue;
+      if (!c.rects) {   // тепловоз и цистерна: внутрь нельзя
+        if (z > -c.len / 2 - 0.3 && z < c.len / 2 + 0.3) { z = z > 0 ? c.len / 2 + 0.3 : -c.len / 2 - 0.3; res.off = center - z; hit = true; }
+        continue;
+      }
+      x = res.d;
+      for (const b of c.rects) {
+        if (x > b[0] - rad && x < b[1] + rad && z > b[2] - rad && z < b[3] + rad) {
+          const e = [x - (b[0] - rad), b[1] + rad - x, z - (b[2] - rad), b[3] + rad - z], m = Math.min(...e), i = e.indexOf(m);
+          if (i === 0) x = b[0] - rad; else if (i === 1) x = b[1] + rad; else if (i === 2) z = b[2] - rad; else z = b[3] + rad;
+          hit = true;
+        }
+      }
+      x = clamp(x, -1.18, 1.18);
+      res = { off: center - z, d: x };
+    }
+    res.hit = hit;
+    return res;
   }
 
   startEngine() {

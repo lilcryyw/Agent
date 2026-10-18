@@ -12,14 +12,14 @@ const LIST = {
   // быт
   cloth: [1, 4], coins: null, drop: null, eat: [1, 3], drink: [1, 2], bottle: null, rummage: null, door_handle: null, door_slam: null, door_slide: null,
   // поезд
-  diesel_idle: null, wheels: null, cab_ride: null, train_pass: null, brake_squeal: null, flange: null, air_loop: null,
+  diesel_idle: null, cab_ride: null, train_pass: null, brake_squeal: null, air_loop: null,
   horn: null, coupling: null, stop_hiss: null, air_release: null, brake_apply: null, air_emerg: null, clack: null, clack2: null,
   // природа
   wind: null, wind_cold: null, rain: null, thunder: null, birds: null, owl: null,
 };
 const FILES = [];
 for (const [k, v] of Object.entries(LIST)) if (v) for (let i = v[0]; i <= v[1]; i++) FILES.push(k + i); else FILES.push(k);
-const LOOPS = ['diesel_idle', 'wheels', 'cab_ride', 'train_pass', 'brake_squeal', 'flange', 'air_loop', 'wind', 'wind_cold', 'rain', 'birds', 'rummage'];
+const LOOPS = ['diesel_idle', 'cab_ride', 'train_pass', 'brake_squeal', 'air_loop', 'wind', 'wind_cold', 'rain', 'birds', 'rummage'];
 
 export class Audio {
   constructor() { this.ctx = null; this.on = true; this.raw = {}; this.buf = {}; this.voices = 0; this.L = {}; this.ready = false; }
@@ -34,8 +34,8 @@ export class Audio {
     const AC = window.AudioContext || window.webkitAudioContext;
     if (!AC) return;
     const c = this.ctx = new AC();
-    this.comp = c.createDynamicsCompressor(); this.comp.threshold.value = -16; this.comp.ratio.value = 4;
-    this.master = c.createGain(); this.master.gain.value = this.on ? 0.95 : 0;
+    this.comp = c.createDynamicsCompressor(); this.comp.threshold.value = -8; this.comp.ratio.value = 2.5; this.comp.attack.value = 0.01; this.comp.release.value = 0.3;
+    this.master = c.createGain(); this.master.gain.value = this.on ? 0.9 : 0;
     this.master.connect(this.comp); this.comp.connect(c.destination);
     const len = c.sampleRate, nb = c.createBuffer(1, len, c.sampleRate), d = nb.getChannelData(0);
     for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
@@ -64,7 +64,7 @@ export class Audio {
     l.g.gain.setTargetAtTime(Math.max(0, vol), now, t);
     if (rate) l.s.playbackRate.setTargetAtTime(rate, now, t);
   }
-  setOn(on) { this.on = on; if (this.master) this.master.gain.value = on ? 0.95 : 0; }
+  setOn(on) { this.on = on; if (this.master) this.master.gain.value = on ? 0.9 : 0; }
   listen(p, f) {
     if (!this.ctx) return;
     const L = this.ctx.listener, t = this.ctx.currentTime;
@@ -95,35 +95,35 @@ export class Audio {
     return { s, g };
   }
 
-  // ---- поезд: вызывается каждый кадр
-  // t: { v, rpm, load, on, starting, TC, dTM, brake, curve, view: 'cab'|'chase'|'foot', dist }
+  // ---- поезд: вызывается каждый кадр. Слоёв мало, чтобы не было «каши»:
+  // мотор (главный), качение (одно), стук на стыках — отдельными щелчками, тормоза и воздух — только когда работают.
+  // t: { v, rpm, load, on, starting, TC, dTM, view: 'cab'|'chase'|'foot'|'inside', dist }
   train(t) {
     if (!this.ready) return;
-    const v = Math.abs(t.v), near = t.view === 'foot' ? Math.max(0.12, Math.min(1, 14 / (t.dist + 4))) : 1;
-    // дизель: обороты меняют высоту, нагрузка — громкость
-    const dRate = t.on ? 0.78 + t.rpm / 1000 * 0.75 : t.starting ? 0.5 + t.starting * 0.4 : 0.6;
-    this.lv('diesel_idle', (t.on ? 0.45 + t.load * 0.55 : t.starting ? 0.35 : 0) * (t.view === 'cab' ? 0.8 : 1) * near, dRate, 0.35);
-    // колёса: от скорости зависят и ритм, и громкость
-    const wv = Math.min(1, v / 14);
-    this.lv('wheels', wv * (t.view === 'cab' ? 0.55 : 0.85) * near, 0.55 + Math.min(v, 28) / 28 * 0.75, 0.3);
-    this.lv('cab_ride', t.view === 'cab' ? Math.min(0.9, v / 18) : 0, 0.7 + Math.min(v, 28) / 28 * 0.5, 0.4);
-    this.lv('train_pass', t.view === 'foot' ? Math.min(1, v / 10) * near * 0.9 : 0, 0.8 + Math.min(v, 25) / 25 * 0.4, 0.4);
-    // скрежет колодок: сильнее при давлении в цилиндрах и на малой скорости
-    const sq = t.TC > 0.6 && v > 0.25 ? (t.TC / 3.8) * Math.min(1, v / 1.5) * (1 - Math.min(1, v / 22)) * 1.3 : 0;
-    this.lv('brake_squeal', sq * near, 0.9 + Math.min(v, 10) / 10 * 0.2, 0.15);
-    // визг гребней в кривых
-    this.lv('flange', v > 6 && t.curve > 0.00006 ? Math.min(0.6, (t.curve - 0.00006) * 4000) * Math.min(1, v / 15) * near : 0, 1, 0.5);
-    // выпуск воздуха краном машиниста
-    this.lv('air_loop', t.dTM < -0.05 ? Math.min(0.8, -t.dTM * 0.6) : 0, 1, 0.1);
+    const v = Math.abs(t.v), out = t.view === 'foot' || t.view === 'chase';
+    const near = t.view === 'foot' ? Math.max(0.06, Math.min(1, 10 / (t.dist + 2))) : t.view === 'inside' ? 0.35 : t.view === 'chase' ? 0.8 : 1;
+    // мотор: нагрузка — громкость, обороты — высота (в умеренных пределах)
+    const dRate = t.on ? 0.9 + Math.min(1, t.rpm / 1000) * 0.32 : t.starting ? 0.55 + t.starting * 0.35 : 0.9;
+    const dVol = t.on ? 0.38 + t.load * 0.42 : t.starting ? 0.3 * t.starting : 0;
+    this.lv('diesel_idle', dVol * near, dRate, 0.4);
+    // качение: в кабине — запись из кабины, снаружи — проходящий поезд
+    const roll = Math.min(1, v / 22);
+    this.lv('cab_ride', !out ? roll * 0.42 * (t.view === 'inside' ? 1.3 : 1) : 0, 0.92 + roll * 0.12, 0.6);
+    this.lv('train_pass', out ? roll * 0.7 * near : 0, 0.92 + roll * 0.12, 0.6);
+    // колодки визжат только при торможении на малой скорости
+    const sq = t.TC > 1.0 && v > 0.3 && v < 9 ? Math.min(0.45, (t.TC - 1) / 2.8 * 0.5) * Math.min(1, v / 1.2) : 0;
+    this.lv('brake_squeal', sq * Math.min(1, near * 1.4), 1, 0.2);
+    // воздух из тормозной магистрали — пока кран в положении торможения
+    this.lv('air_loop', t.dTM < -0.08 && t.view !== 'foot' ? Math.min(0.45, -t.dTM * 0.35) : 0, 1, 0.12);
   }
   ambience(o) {
     if (!this.ready) return;
-    const out = o.outside ? 1 : 0.45;
-    this.lv('wind', (o.windK * 0.35 + Math.min(0.35, o.speed / 60)) * out * (o.winter ? 0.3 : 1), 1, 1);
-    this.lv('wind_cold', o.winter ? (0.25 + o.windK * 0.3) * out : 0, 1, 1);
-    this.lv('rain', o.rain ? 0.55 * out : 0, 1, 1.2);
-    this.lv('birds', o.birds ? 0.22 * out : 0, 1, 2);
-    this.lv('rummage', o.searching ? 0.8 : 0, 1, 0.2);
+    const out = o.outside ? 1 : 0.3;
+    this.lv('wind', (o.windK * 0.16 + Math.min(0.18, o.speed / 120)) * out * (o.winter ? 0.4 : 1), 1, 1.5);
+    this.lv('wind_cold', o.winter ? (0.1 + o.windK * 0.12) * out : 0, 1, 1.5);
+    this.lv('rain', o.rain ? 0.35 * out : 0, 1, 1.5);
+    this.lv('birds', o.birds && o.outside ? 0.1 : 0, 1, 3);
+    this.lv('rummage', o.searching ? 0.6 : 0, 1, 0.2);
   }
   // ---- события поезда
   hornOn() {
@@ -141,8 +141,8 @@ export class Audio {
   }
   clack(v, offsets, vol = 1) {
     if (v < 1) return;
-    const k = Math.min(0.8, 0.15 + v / 35) * vol;
-    for (const o of offsets) this.play(Math.random() < 0.5 ? 'clack' : 'clack2', { vol: k, rate: 0.75 + Math.random() * 0.15, delay: o / v });
+    const k = Math.min(0.7, 0.18 + v / 40) * vol;
+    for (const o of offsets) this.play(Math.random() < 0.5 ? 'clack' : 'clack2', { vol: k, rate: 0.85 + Math.random() * 0.1, delay: o / v });
   }
   couplers(n, vol = 1) { for (let i = 0; i < n; i++) this.play('clank', { vol: vol * (1 - i * 0.12), rate: 0.75 + Math.random() * 0.2, delay: i * 0.35 + Math.random() * 0.1 }); }
   // ---- оружие и прочее
@@ -166,17 +166,27 @@ export class Audio {
     const g = c.createGain(); g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
     s.connect(f); f.connect(g); g.connect(this.master); s.start(t); s.stop(t + dur + 0.05);
   }
+  // голоса зомби: не больше одного стона за ~1,3 с, иначе сливаются в гул
   groan(vol, pos, runner) {
+    const now = this.ctx ? this.ctx.currentTime : 0;
+    if (now - (this.lastGroan || 0) < 1.3) return;
+    this.lastGroan = now;
     const pool = runner ? ['z_growl', 'z_grunt'] : ['z_moan', 'z_mmoan', 'z_growl'];
-    this.play(pool[Math.floor(Math.random() * pool.length)], { pos, vol: 0.8 * vol + 0.35, vary: 0.15 });
+    this.play(pool[Math.floor(Math.random() * pool.length)], { pos, vol: 0.55 * vol + 0.25, vary: 0.12, ref: 4 });
+  }
+  zstep(pos) {
+    const now = this.ctx ? this.ctx.currentTime : 0;
+    if (now - (this.lastZStep || 0) < 0.16) return;
+    this.lastZStep = now;
+    this.play(Math.random() < 0.15 ? 'z_drag' : 'z_step', { pos, vol: 0.5, vary: 0.15, ref: 2 });
   }
   scream(pos) { this.play('z_scream', { pos, vol: 1.2, ref: 8, must: true }); }
   splat(pos) { this.play('flesh', { pos, vol: 1, vary: 0.1 }); this.play('clank', { pos, vol: 0.7, rate: 0.8 }); }
   thud() { this.play('clank', { vol: 0.7, vary: 0.2 }); }
   beep() { for (let i = 0; i < 3; i++) this.tone(1000, 0.12, 'square', 0.08, i * 0.25); }
   alarm() { for (let i = 0; i < 4; i++) { this.tone(700, 0.18, 'square', 0.1, i * 0.4); this.tone(500, 0.18, 'square', 0.1, i * 0.4 + 0.2); } }
-  starter() { this.burst(1.8, 900, 'bandpass', 0.18); this.tone(55, 2.2, 'sawtooth', 0.12, 0, 30); this.play('door_handle', { vol: 0.5 }); }
+  starter() { this.play('door_handle', { vol: 0.5, rate: 0.8 }); this.play('air_release', { vol: 0.35, rate: 1.3, delay: 0.4 }); }
   click() { this.play('door_handle', { vol: 0.25, rate: 2.2 }); }
-  notch() { this.play('g_reload', { vol: 0.35, rate: 1.6, vary: 0.1 }); }
+  notch() { this.play('door_handle', { vol: 0.28, rate: 1.7, vary: 0.1 }); }
   coin() { this.play('coins', { vol: 0.7 }); }
 }

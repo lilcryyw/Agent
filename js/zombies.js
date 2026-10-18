@@ -4,17 +4,17 @@ import { toTrack, worldPos, frameAt, pick, R, wpick, clamp } from './util.js';
 
 // base — тело, v — текстура, sc — пропорции, anim — походка
 export const ZTYPES = {
-  walker:   { n: 'Ходок', hp: 40, sp: [0.8, 1.4], dmg: 4, tdmg: 0.6, w: 10, minKm: 0, base: ['soldier', 'woman'], v: ['rot', 'rot2'] },
-  worker:   { n: 'Путеец', hp: 50, sp: [0.9, 1.3], dmg: 4, tdmg: 0.6, w: 1.5, minKm: 0, base: ['soldier'], v: ['rot2'] },
-  runner:   { n: 'Бегун', hp: 30, sp: [4.0, 5.2], dmg: 3, tdmg: 0.4, w: 3, minKm: 2, base: ['woman', 'soldier'], v: ['rot'], run: true },
-  fat:      { n: 'Толстяк', hp: 170, sp: [0.6, 0.85], dmg: 8, tdmg: 3, w: 1.5, minKm: 4, base: ['soldier'], v: ['rot'], sc: [1.45, 1.0, 1.35], trainHit: 4 },
-  screamer: { n: 'Крикун', hp: 35, sp: [1.8, 2.4], dmg: 3, tdmg: 0.4, w: 0.8, minKm: 5, base: ['woman'], v: ['rot2'], run: true },
-  soldier:  { n: 'Солдат', hp: 100, sp: [1.0, 1.4], dmg: 6, tdmg: 1, w: 1.2, minKm: 7, base: ['soldier'], v: ['rot'] },
-  frozen:   { n: 'Обмороженный', hp: 70, sp: [0.7, 1.0], dmg: 5, tdmg: 0.8, w: 0, minKm: 0, winter: 4, base: ['soldier', 'woman'], v: ['frozen'] },
-  giant:    { n: 'Громила', hp: 520, sp: [1.3, 1.7], dmg: 16, tdmg: 7, w: 0.25, minKm: 18, base: ['soldier'], v: ['burnt'], sc: [1.55, 1.55, 1.55], trainHit: 12 },
+  walker:   { n: 'Ходок', hp: 40, sp: [0.8, 1.4], dmg: 4, tdmg: 0.6, w: 10, minKm: 0, v: ['base', 'base', 'pale', 'green'] },
+  worker:   { n: 'Путеец', hp: 50, sp: [0.9, 1.3], dmg: 4, tdmg: 0.6, w: 1.5, minKm: 0, v: ['base'] },
+  runner:   { n: 'Бегун', hp: 30, sp: [4.0, 5.2], dmg: 3, tdmg: 0.4, w: 3, minKm: 2, v: ['pale', 'base'], run: true },
+  fat:      { n: 'Толстяк', hp: 170, sp: [0.6, 0.85], dmg: 8, tdmg: 3, w: 1.5, minKm: 4, v: ['green'], sc: [1.4, 1.05, 1.35], trainHit: 4 },
+  screamer: { n: 'Крикун', hp: 35, sp: [1.8, 2.4], dmg: 3, tdmg: 0.4, w: 0.8, minKm: 5, v: ['pale'], run: true },
+  soldier:  { n: 'Обгоревший', hp: 100, sp: [1.0, 1.4], dmg: 6, tdmg: 1, w: 1.2, minKm: 7, v: ['burnt'] },
+  frozen:   { n: 'Обмороженный', hp: 70, sp: [0.7, 1.0], dmg: 5, tdmg: 0.8, w: 0, minKm: 0, winter: 4, v: ['frozen'] },
+  giant:    { n: 'Громила', hp: 520, sp: [1.3, 1.7], dmg: 16, tdmg: 7, w: 0.25, minKm: 18, v: ['burnt'], sc: [1.55, 1.55, 1.55], trainHit: 12 },
 };
 const _t = {}, _v = new THREE.Vector3(), _d = new THREE.Vector3(), _up = new THREE.Vector3(0, 1, 0);
-const MAXZ = 34;
+const MAXZ = 26;
 
 export class Zombies {
   constructor(scene) { this.scene = scene; this.list = []; this.frame = 0; }
@@ -37,14 +37,14 @@ export class Zombies {
       if (i < 0) return null; this.remove(i);
     }
     const t = ZTYPES[type];
-    const ch = new Char(pick(r, t.base), pick(r, t.v), t.sc || [1, 1, 1]);
+    const ch = new Char('zombie', pick(r, t.v), t.sc || [1, 1, 1]);
     ch.root.position.set(x, 0, z);
     this.scene.add(ch.root);
     const hpMul = 1 + km / 120;
     const zb = { type, t, h: ch, hp: t.hp * hpMul, max: t.hp * hpMul, sp: R(r, t.sp[0], t.sp[1]), phase: r() * 6, state: 'walk',
       atk: 0, groan: 2 + r() * 8, screamed: false, vel: null, deadT: 0, off: 0, side: 1, size: t.sc ? t.sc[1] : 1, lod: 0 };
     zb.home = home || { x, z }; zb.alert = 0;
-    ch.mixer.setTime(r() * 2);
+    ch.mixer.setTime(r() * 3); zb.atkAnim = pick(r, ['attack', 'attack2', 'attack3']); zb.walkAnim = r() < 0.8 ? 'walk' : 'walk2';
     this.list.push(zb);
     return zb;
   }
@@ -58,9 +58,8 @@ export class Zombies {
     return false;
   }
   kill(z, fling) {
-    z.h.mixer.stopAllAction();
-    if (fling) { z.state = 'fly'; z.vel = fling; z.deadT = 0; }
-    else { z.state = 'dead'; z.deadT = 0; z.fall = 0; }
+    if (fling) { z.h.mixer.stopAllAction(); z.h.cur = null; z.state = 'fly'; z.vel = fling; z.deadT = 0; }
+    else { z.state = 'dead'; z.deadT = 0; z.h.play('death', 0.15, 1.4); }
   }
 
   update(dt, c) {
@@ -75,11 +74,12 @@ export class Zombies {
         if (z.state === 'fly') {
           z.vel.y -= 9.8 * dt; p.addScaledVector(z.vel, dt);
           ch.inner.rotation.x += dt * 7; ch.inner.rotation.z += dt * 3;
-          if (p.y <= 0 && z.vel.y < 0) { p.y = 0; z.state = 'dead'; z.fall = 1; ch.inner.rotation.set(-Math.PI / 2, 0, 0); }
-        } else {
-          z.fall = Math.min(1, (z.fall || 0) + dt * 2.2);
-          ch.inner.rotation.x = -Math.PI / 2 * (z.fall * z.fall);
+          if (p.y <= 0 && z.vel.y < 0) {
+            p.y = 0; z.state = 'dead'; ch.inner.rotation.set(0, 0, 0);
+            ch.play('death', 0); const a = ch.act.death; a.time = a.getClip().duration * 0.97;
+          }
         }
+        ch.update(dt);
         if (z.deadT > 8 || zs < sR - 150) this.remove(i);
         continue;
       }
@@ -94,7 +94,7 @@ export class Zombies {
         if (z.onPlayer) {
           if (!P.onGround) { z.state = 'walk'; z.onPlayer = false; }
           else {
-            anim = 'idle'; swing = true; z.atk -= dt;
+            anim = z.atkAnim; swing = true; z.atk -= dt;
             if (z.atk <= 0) { z.atk = 1.15; c.sound('attack', z, camD); c.hurtPlayer(z.t.dmg, true, z); }
             face(z, P.pos.x - p.x, P.pos.z - p.z);
             if (Math.hypot(P.pos.x - p.x, P.pos.z - p.z) > 1.5) { z.state = 'walk'; z.onPlayer = false; }
@@ -103,7 +103,7 @@ export class Zombies {
           const s = sF + z.off;
           worldPos(s, z.side * 1.85, 0, _v); p.set(_v.x, 0.55, _v.z);
           frameAt(s, _t); z.h.root.rotation.y = _t.yaw + z.side * Math.PI / 2;
-          anim = 'idle'; swing = true; z.atk -= dt;
+          anim = z.atkAnim; swing = true; z.atk -= dt;
           if (z.atk <= 0) {
             z.atk = 1;
             c.hurtTrain(z.t.tdmg * (tr.up.armor ? 0.5 : 1)); if (Math.random() < 0.6) c.sound('bang', z, camD);
@@ -136,8 +136,9 @@ export class Zombies {
         }
         if (z.alert > 0) z.alert -= dt;
         const dx = tx - p.x, dz = tz - p.z, dist = Math.hypot(dx, dz);
-        if (z.type === 'screamer' && !z.screamed && toPlayer && pd < 30) { z.screamed = true; c.scream(z); }
-        if (wander && z.wait > 0) { z.wait -= dt; anim = 'idle'; }
+        if (z.type === 'screamer' && !z.screamed && toPlayer && pd < 30) { z.screamed = true; z.scrT = 2.2; c.scream(z); }
+        if (z.scrT > 0) { z.scrT -= dt; anim = 'scream'; }
+        else if (wander && z.wait > 0) { z.wait -= dt; anim = 'idle'; }
         else if (dist > 0.6) {
           const st = Math.min(dist, z.sp * dt * (z.flinch > 0 ? 0.3 : 1) * (wander ? 0.45 : 1));
           speed = z.sp * (wander ? 0.45 : 1);
@@ -146,7 +147,7 @@ export class Zombies {
           if (z.stepAcc > (z.t.run && !wander ? 1.3 : 0.75)) { z.stepAcc = 0; if (camD < 26) c.sound('step', z, camD); }
           p.x += dx / dist * st; p.z += dz / dist * st;
           face(z, dx, dz);
-          anim = z.t.run && !wander ? 'run' : 'walk';
+          anim = z.t.run && !wander ? 'run' : z.walkAnim;
         } else anim = 'idle';
         p.y = c.groundH(zs, zd);
         if (toPlayer && dist < 1.15) { z.state = 'attack'; z.onPlayer = true; z.atk = 0.4; }
@@ -171,22 +172,9 @@ export class Zombies {
       z.lod += dt;
       if (far && (this.frame + i) % 4) continue;
       const adt = far ? z.lod : dt; z.lod = 0;
-      const sc = anim === 'run' ? speed / 3.6 : anim === 'walk' ? Math.max(0.45, speed / 1.5) : 1;
+      const sc = anim === 'run' ? speed / 3.2 : anim === 'walk' ? Math.max(0.6, speed / 0.7) : anim === 'walk2' ? Math.max(0.6, speed / 1.3) : swing ? 1.5 : 1;
       ch.play(anim, 0.3, sc);
       ch.update(adt);
-      if (far) continue;
-      // поза зомби: руки вперёд, при атаке — удары
-      z.phase += dt * (swing ? 7 : 2);
-      ch.root.updateMatrixWorld(true);
-      const yaw = ch.root.rotation.y;
-      for (const [arm, fore, k] of [['LeftArm', 'LeftForeArm', 1], ['RightArm', 'RightForeArm', -1]]) {
-        const lift = swing ? 0.25 + Math.sin(z.phase + k) * 0.55 : -0.05 + Math.sin(z.phase + k) * 0.08;
-        _d.set(-Math.sin(yaw), lift, -Math.cos(yaw));
-        _d.x += Math.cos(yaw) * k * -0.18; _d.z += -Math.sin(yaw) * k * -0.18;
-        _d.normalize();
-        ch.aim(arm, fore, _d, anim === 'run' ? 0.5 : 0.85);
-      }
-      const hd = ch.bones.Head; if (hd) { hd.rotation.z += Math.sin(z.phase * 0.3) * 0.25; hd.rotation.x += 0.2; }
     }
   }
   // шум (выстрел, гудок) поднимает всех вокруг

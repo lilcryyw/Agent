@@ -138,6 +138,8 @@ button.ghost { background: transparent; color: var(--dim); }
 #hit { position: fixed; top: 40%; left: 50%; transform: translate(-50%, -50%); font-family: var(--f-disp); color: var(--red); font-size: 18px; opacity: 0; pointer-events: none; text-shadow: 0 1px 3px #000; }
 #hit.on { animation: pop .6s ease-out; }
 @keyframes pop { 0% { opacity: 1; transform: translate(-50%, -50%) scale(1.3); } 100% { opacity: 0; transform: translate(-50%, -80%) scale(1); } }
+#xhair { position: fixed; left: 50%; top: 50%; width: 22px; height: 22px; margin: -11px 0 0 -11px; pointer-events: none; border-radius: 50%; border: 1.5px solid #ffffffb0; box-shadow: 0 0 2px #0008; }
+#xhair i { position: absolute; left: 9px; top: 9px; width: 4px; height: 4px; border-radius: 50%; background: #fff; box-shadow: 0 0 2px #000; }
 #hurt { position: fixed; inset: 0; pointer-events: none; opacity: 0; transition: opacity .25s; background: radial-gradient(ellipse at center, transparent 45%, #8a0a06 100%); }
 #cabframe { position: fixed; inset: 0; pointer-events: none;
   background: linear-gradient(90deg, #171c19 0 6%, transparent 6% 49.3%, #171c19 49.3% 50.7%, transparent 50.7% 94%, #171c19 94%),
@@ -239,6 +241,7 @@ h3 { margin: 12px 0 4px; font-size: 11px; letter-spacing: .14em; color: var(--am
 <div id="cabframe" hidden></div>
 <div id="hurt"></div>
 <div id="hit">В ГОЛОВУ</div>
+<div id="xhair" hidden><i></i></div>
 
 <div id="hud" hidden>
   <div id="top">
@@ -300,7 +303,7 @@ h3 { margin: 12px 0 4px; font-size: 11px; letter-spacing: .14em; color: var(--am
     <button class="pri" data-act="new">Новый рейс</button>
     <button data-act="help">Как управлять</button>
   </div>
-  <div class="cred">Текстуры: Poly Haven · Модели: Quaternius · Звуки: Red Library, Kenney, OpenGameArt (всё CC0) · 3D: three.js</div>
+  <div class="cred">Текстуры: Poly Haven · Модели: Quaternius, OpenGameArt · Звуки: Red Library, Kenney, OpenGameArt (всё CC0) · 3D: three.js</div>
 </div>
 
 <div id="rotate"><div><b>Поверните телефон</b>Игра работает в альбомной ориентации — как пульт машиниста.</div></div>

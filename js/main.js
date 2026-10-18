@@ -9,6 +9,7 @@ import { Audio } from './audio.js';
 import { ITEMS, CAT_NAMES, WEAPONS, AMMO, LOOT, WAGON_CARGO, LOOT_TIME, UPGRADES, makeUnique, ICONS, itemDesc } from './data.js';
 import { iconImg } from './icons.js';
 import { loadPacks } from './packs.js';
+import { ViewModel } from './viewmodel.js';
 
 const $ = (s) => document.querySelector(s);
 const SAVE = 'mp_save_v2', SAFE = 'mp_safe_v2', OPTS = 'mp_opts_v1';
@@ -90,6 +91,7 @@ const blood = (() => {
 const audio = new Audio(); audio.on = opts.sound;
 let S = null, world = null, train = null, player = null;
 const zombies = new Zombies(scene);
+const vm = new ViewModel();
 let running = false, paused = true, camMode = 'chase';
 const orbit = { yaw: 0.35, h: 8, dist: 19 }, look = { yaw: 0, pitch: -0.04 }, fcam = { yaw: 0, pitch: 0.25 };
 let fireCd = 0, spawnT = 1, saveT = 10, hudT = 0, turretCd = 0, arrivedK = -1, warnedK = -1, guardT = 0;
@@ -148,7 +150,7 @@ function loadGame(o) {
   buildTrain(S.train); setupWorld();
   const pm = S.player;
   if (pm && pm.mode === 'ground') { player.mode = 'ground'; player.pos.set(pm.x, 0, pm.z); player.root.visible = true; }
-  else if (pm && pm.mode === 'roof') { player.mode = 'roof'; player.off = pm.off; player.d = pm.d; player.root.visible = true; }
+  else if (pm && (pm.mode === 'roof' || pm.mode === 'inside')) { player.mode = pm.mode; player.off = pm.off; player.d = pm.d; }
   else enterCab(true);
   updateCargo(); start(); syncPiles();
 }
@@ -225,12 +227,12 @@ const zctx = {
   trainNoise: 0,
   sound(kind, z, dist) {
     const pos = z.h.root.position;
-    if (kind === 'groan') audio.groan(1 - dist / 50, pos, z.t.run);
+    if (kind === 'groan') { if (dist < 40) audio.groan(1 - dist / 40, pos, z.t.run); }
     else if (kind === 'splat') audio.splat(pos);
     else if (kind === 'notice') audio.play('z_growl', { pos, vol: 1.1, vary: 0.15 });
     else if (kind === 'attack') audio.play('z_attack', { pos, vol: 1.2, vary: 0.1 });
     else if (kind === 'bang') audio.play(Math.random() < 0.5 ? 'clank' : 'hit_metal', { pos, vol: 0.8, vary: 0.25 });
-    else if (kind === 'step') audio.play(Math.random() < 0.15 ? 'z_drag' : 'z_step', { pos, vol: 0.7, vary: 0.15, ref: 2.5 });
+    else if (kind === 'step') { if (dist < 16) audio.zstep(pos); }
   },
   scream(z) {
     audio.scream(z.h.root.position); zombies.alarm(z.h.root.position.x, z.h.root.position.z, 90); notify('Крикун созывает мертвецов!', 'alert');
@@ -246,7 +248,13 @@ function frame(now) {
   requestAnimationFrame(frame);
   const dt = Math.min(0.05, (now - last) / 1000); last = now;
   if (running && !paused) step(dt);
-  if (train) { updateCamera(dt); renderer.render(scene, camera); camera.getWorldDirection(_ld); audio.listen(camera.position, _ld); }
+  if (train) {
+    updateCamera(dt); renderer.render(scene, camera);
+    const fp = isFP();
+    if (fp) { vm.set(S && S.weapon); vm.update(dt, { show: !player.busy, moving: player.moving / 1.6, running: player.running, crouch: player.crouch, yaw: fcam.yaw, pitch: fcam.pitch, dayK: dayKNow }); vm.render(renderer, camera.aspect); }
+    $('#xhair').hidden = !fp;
+    camera.getWorldDirection(_ld); audio.listen(camera.position, _ld);
+  }
   if (running) { noteTick(dt); hudT -= dt; if (hudT <= 0) { hudT = 0.12; updateHud(); } drawDash(); }
 }
 function env() {
@@ -281,9 +289,10 @@ function step(dt) {
     }
   }
   const j0 = Math.floor(prevS / 25), j1 = Math.floor(train.s / 25);
-  if (j0 !== j1 && train.v > 1) { const back = train.s - j1 * 25; audio.clack(train.v, AXLES.filter((a) => a < 40 && a > back).map((a) => a - back)); }
+  if (j0 !== j1 && train.v > 1) { const back = train.s - j1 * 25; audio.clack(train.v, AXLES.filter((a) => a < 40 && a > back).map((a) => a - back), player.mode === 'cab' ? (camMode === 'cab' ? 1 : 0.7) : player.mode === 'inside' ? 0.8 : Math.min(1, 10 / (player.pos.distanceTo(train.loco.g.position) + 2))); }
   world.update(train.s);
   player.update(dt, input(), train, world, zctx.groundH);
+  if (player.mode !== 'cab') player.root.visible = false;
   if (player.mode === 'ground' && Math.abs(train.v) > 0.5 && !S.leftWarn) { S.leftWarn = true; notify('Поезд катится без машиниста!', 'alert'); }
   const hrs = dt / 40;
   S.time += hrs; if (S.time >= 24) { S.time -= 24; S.day++; }
@@ -330,7 +339,7 @@ function newWeather(season) {
 }
 // зомби там, где жили люди: чем больше домов и квартир рядом, тем больше мертвецов
 const POP = { apartment: 7, shop_food: 3, shop_med: 3, shop_hoz: 2, shop_auto: 2, shop_hunt: 2, kiosk: 1, station: 4, police: 5, hospital: 6, school: 5,
-  house: 1.5, dacha: 0.8, garage: 0.7, factory: 2.5, church: 1.5, military: 4, azs: 1.5, car: 0.4, wagon_box: 0.4, wagon_tank: 0.2, ruins: 0.6 };
+  house: 1.5, dacha: 0.8, garage: 0.7, factory: 2.5, church: 1.5, military: 4, azs: 1.5, car: 0.4, wagon_box: 0.4, wagon_tank: 0.2, wagon_pass: 0.9, ruins: 0.6 };
 const ZBASE = { forest: 2, field: 1.5, swamp: 3, village: 2, dacha: 2, town: 4, industrial: 3, settlement: 0 };
 let spawned = new Map();
 function spawn(dt) {
@@ -382,8 +391,8 @@ function groundSurface(p) {
   return z === 'town' || z === 'industrial' || z === 'settlement' ? (Math.random() < 0.7 ? 'st_concrete' : 'st_grass') : 'st_grass';
 }
 function footstep(kind, vol) {
-  const k = kind === 'metal' ? 'st_metal' : groundSurface(player.pos);
-  audio.play(k, { vol: vol * (k === 'st_metal' ? 0.8 : 1.1), vary: 0.12 });
+  const k = kind === 'metal' ? 'st_metal' : player.mode === 'inside' ? 'st_wood' : groundSurface(player.pos);
+  audio.play(k, { vol: vol * (k === 'st_metal' ? 0.55 : 0.75), vary: 0.12 });
 }
 function guards(dt) {
   guardT -= dt; if (guardT > 0) return; guardT = 0.7;
@@ -423,6 +432,7 @@ function trainSpots() {
     const center = -o - c.len / 2;
     const sp = c.spots || {};
     if (sp.door != null) for (const f of [1, -1]) out.push({ kind: 'door', off: center - sp.door, d: f * 2.05, f });
+    if (sp.doors) for (const z of sp.doors) for (const f of [1, -1]) out.push({ kind: 'cardoor', off: center - z, d: f * 2.05, f, car: c });
     if (sp.ladder != null) for (const f of [1, -1]) out.push({ kind: 'ladder', off: center - sp.ladder, d: f * 2.0, f, top: center - sp.top });
     o += c.len + 0.6;
   }
@@ -445,16 +455,42 @@ function exitCab() {
   player.pos.copy(worldPos(train.s + door.off, door.f * 1.5)); player.pos.y = 2.1;
   player.root.visible = true;
   player.climb([{ p: player.pos.clone() }, { rel: true, off: door.off, d: door.d, y: 0.4 }, { rel: true, off: door.off, d: door.f * 3.2, y: 0.4 }], 'ground', 1.1);
-  frameAt(train.s, _tt); fcam.yaw = _tt.yaw + side * 0.35; fcam.pitch = 0.3;
+  frameAt(train.s, _tt); fcam.yaw = _tt.yaw - side * Math.PI / 2; fcam.pitch = 0;
   S.leftWarn = false;
   if (S.tut < 2) { S.tut = 2; notify('Джойстик слева — идти, до упора — бег. Свайп справа — осмотреться. Красная кнопка — огонь.', 'me'); }
 }
+// вагон: войти через тамбур, выйти на ту же сторону
+function enterCar(sp) {
+  const fl = sp.car.floor + 0.64;
+  player.climb([{ p: player.pos.clone() }, { rel: true, off: sp.off, d: sp.d, y: 0.4 }, { rel: true, off: sp.off, d: sp.f * 1.62, y: fl - 0.3 }, { rel: true, off: sp.off, d: sp.f * 0.85, y: fl }], 'inside', 1.6);
+  audio.play('door_handle', { vol: 0.7, delay: 0.3 }); audio.play('door_slide', { vol: 0.7, delay: 0.6 });
+}
+function exitCar(sp) {
+  const fl = sp.car.floor + 0.64;
+  player.climb([{ p: player.pos.clone() }, { rel: true, off: sp.off, d: sp.f * 0.85, y: fl }, { rel: true, off: sp.off, d: sp.f * 1.62, y: fl - 0.3 }, { rel: true, off: sp.off, d: sp.f * 2.4, y: 0.4 }], 'ground', 1.5);
+  audio.play('door_slide', { vol: 0.7 });
+}
+function carDoorNear() {
+  if (player.mode !== 'inside') return null;
+  return trainSpots().find((sp) => sp.kind === 'cardoor' && Math.abs(player.off - sp.off) < 0.6 && Math.sign(player.d || 1) === sp.f && Math.abs(player.d) > 0.45) || null;
+}
+function berthNear() {
+  if (player.mode !== 'inside') return false;
+  const ci = train.carAt(player.off); if (!ci || !ci.c.rects) return false;
+  return player.d < 0.75 && ci.z > -ci.c.len / 2 + 3.6 && ci.z < ci.c.len / 2 - 3.0;
+}
+function sleep() {
+  if (zombies.list.some((z) => alive(z) && z.h.root.position.distanceTo(player.pos) < 25)) { notify('Рядом мертвецы — не уснуть.', 'me'); return; }
+  S.time += 4; if (S.time >= 24) { S.time -= 24; S.day++; }
+  S.hp = Math.min(100, S.hp + 30); S.food = Math.max(0, S.food - 10); S.water = Math.max(0, S.water - 12);
+  notify('Поспали на нижней полке. Прошло 4 часа.', 'me'); audio.play('cloth', { vol: 0.6 });
+}
 function orbitSide() { return Math.sin(orbit.yaw) >= 0 ? 1 : -1; }
 function climbUp(sp) {
-  player.climb([{ p: player.pos.clone() }, { rel: true, off: sp.off, d: sp.d, y: 0.4 }, { rel: true, off: sp.off, d: sp.f * 1.7, y: 3.0 }, { rel: true, off: sp.top, d: sp.f * 0.8, y: player.roofY(train, sp.top) }], 'roof', 2.2);
+  player.climb([{ p: player.pos.clone() }, { rel: true, off: sp.off, d: sp.d, y: 0.4 }, { rel: true, off: sp.off, d: sp.f * 1.7, y: 3.0 }, { rel: true, off: sp.top, d: sp.f * 0.8, y: player.roofY(train, sp.top, sp.f * 0.8) }], 'roof', 2.2);
 }
 function climbDown(sp) {
-  player.climb([{ p: player.pos.clone() }, { rel: true, off: sp.top, d: sp.f * 1.0, y: player.roofY(train, sp.top) }, { rel: true, off: sp.off, d: sp.f * 1.7, y: 3.0 }, { rel: true, off: sp.off, d: sp.d + sp.f, y: 0.4 }], 'ground', 2.0);
+  player.climb([{ p: player.pos.clone() }, { rel: true, off: sp.top, d: sp.f * 1.0, y: player.roofY(train, sp.top, sp.f * 1.0) }, { rel: true, off: sp.off, d: sp.f * 1.7, y: 3.0 }, { rel: true, off: sp.off, d: sp.d + sp.f, y: 0.4 }], 'ground', 2.0);
 }
 
 // ---------------- обыск, расчистка
@@ -482,7 +518,7 @@ function strHash(s) { let h = 7; for (let i = 0; i < s.length; i++) h = Math.imu
 function rollLoot(L) {
   const r = rngOf(S.seed, 707, strHash(L.id)), out = [];
   if (L.type === 'wagon_tank') { out.push({ fuel: RI(r, 150, 600) }); return out; }
-  let table = L.type;
+  let table = L.type === 'wagon_pass' ? 'apartment' : L.type;
   if (L.type === 'wagon_box') { const [id, a, b] = pick(r, WAGON_CARGO); out.push({ id, qty: RI(r, a, b) }); table = 'station'; if (r() < 0.6) return out; }
   const T0 = LOOT[table]; if (!T0) return out;
   const n = RI(r, T0.rolls[0], T0.rolls[1]) + (train.s > 40000 && r() < 0.4 ? 1 : 0);
@@ -513,7 +549,26 @@ function pickZombie(sx, sy) {
   }
   return best;
 }
+// прицел по центру экрана: зомби ближе всех к линии взгляда (с небольшой доводкой)
+const _cf = new THREE.Vector3(), _hp = new THREE.Vector3();
+function aimTarget() {
+  if (!S.weapon) return null;
+  const W = WEAPONS[S.weapon]; camera.getWorldDirection(_cf);
+  let best = null, bs = 1e9;
+  for (const z of zombies.list) {
+    if (!alive(z)) continue;
+    for (const hh of [1.0, 1.55]) {
+      _hp.copy(z.h.root.position); _hp.y += hh * z.size;
+      const d = _hp.distanceTo(camera.position); if (d > W.range * 1.2 || d < 0.3) continue;
+      _hp.sub(camera.position).normalize();
+      const ang = Math.acos(clamp(_hp.dot(_cf), -1, 1)), tol = Math.atan(0.55 * z.size / d) + 0.06;
+      if (ang < tol && ang / tol < bs) { bs = ang / tol; best = z; best._head = hh > 1.2 && ang < Math.atan(0.2 / d) + 0.02; }
+    }
+  }
+  return best;
+}
 function autoTarget() {
+  if (isFP()) return aimTarget();
   if (!S.weapon) return null;
   const W = WEAPONS[S.weapon]; shotOrigin(_o);
   const f = new THREE.Vector3(); camera.getWorldDirection(f); f.y = 0; f.normalize();
@@ -531,6 +586,7 @@ function autoTarget() {
 }
 function shotOrigin(v) {
   if (player.mode === 'cab') return train.loco.g.localToWorld(v.copy(train.loco.gunPos));
+  if (isFP()) return v.copy(camera.position);
   return v.copy(player.pos).add(new THREE.Vector3(0, 1.45, 0));
 }
 function fire(z) {
@@ -539,21 +595,23 @@ function fire(z) {
   if ((S.ammo[W.ammo] || 0) <= 0) { notify('Нет патронов ' + AMMO[W.ammo].n, 'me'); audio.click(); fireCd = 0.6; return; }
   S.ammo[W.ammo]--; fireCd = W.rate; audio.shot(W.snd);
   shotOrigin(_o);
+  const fp = isFP(), _m = new THREE.Vector3();
+  if (fp) { vm.fire(W.snd === 'pistol' ? 0.6 : W.snd === 'sniper' || W.snd === 'shotgun' ? 1.3 : 0.45); fcam.pitch = clamp(fcam.pitch + ({ pistol: 0.02, smg: 0.012, rifle: 0.018, shotgun: 0.05, sniper: 0.06 }[W.snd] || 0.02), -1.35, 1.35); fcam.yaw += (Math.random() - 0.5) * 0.01; vm.muzzleWorld(camera, _m); }
   zombies.alarm(_o.x, _o.z, { pistol: 55, smg: 65, rifle: 110, shotgun: 80, sniper: 150 }[W.snd] || 70);
   if (!z) {
     const f = new THREE.Vector3(); camera.getWorldDirection(f);
     if (player.mode !== 'cab') { player.aimDir.copy(f); player.aimT = 0.6; }
-    tracer(_o, _o.clone().addScaledVector(f, 60)); return;
+    tracer(fp ? _m : _o, _o.clone().addScaledVector(f, 60)); return;
   }
-  _p.copy(z.h.root.position); _p.y += 1.1 * z.size;
+  _p.copy(z.h.root.position); _p.y += (z._head ? 1.55 : 1.1) * z.size;
   if (player.mode !== 'cab') { player.aimDir.copy(_p).sub(_o).normalize(); player.aimT = 0.7; }
   const d3 = _o.distanceTo(_p), r = Math.random;
   const hitP = clamp(1.05 - d3 / W.range * 0.6, 0.12, 0.97);
   let dmg = 0, hits = 0;
   for (let i = 0; i < W.pellets; i++) if (r() < hitP) { hits++; dmg += W.dmg * (W.pellets > 1 ? clamp(1 - d3 / W.range * 0.7, 0.2, 1) : 1); }
-  const headShot = hits > 0 && r() < 0.18;
-  if (hits) { const dead = zombies.hit(z, dmg, headShot); audio.play('flesh', { pos: z.h.root.position, vol: 0.9, vary: 0.2 }); audio.play('impact', { pos: z.h.root.position, vol: 0.5 }); if (dead) { zctx.onKill(z); audio.play(Math.random() < 0.5 ? 'z_death' : 'body_fall', { pos: z.h.root.position, vol: 0.8, delay: 0.15 }); } bleed(_p); tracer(_o, _p); if (headShot) hitMark(); }
-  else tracer(_o, _p.clone().add(new THREE.Vector3(R(r, -1.5, 1.5), R(r, -0.5, 1.2), R(r, -1.5, 1.5))));
+  const headShot = hits > 0 && (fp ? !!z._head && r() < 0.85 : r() < 0.18); z._head = false;
+  if (hits) { const dead = zombies.hit(z, dmg, headShot); audio.play('flesh', { pos: z.h.root.position, vol: 0.9, vary: 0.2 }); audio.play('impact', { pos: z.h.root.position, vol: 0.5 }); if (dead) { zctx.onKill(z); audio.play(Math.random() < 0.5 ? 'z_death' : 'body_fall', { pos: z.h.root.position, vol: 0.8, delay: 0.15 }); } bleed(_p); tracer(fp ? _m : _o, _p); if (headShot) hitMark(); }
+  else tracer(fp ? _m : _o, _p.clone().add(new THREE.Vector3(R(r, -1.5, 1.5), R(r, -0.5, 1.2), R(r, -1.5, 1.5))));
 }
 function tracer(a, b) {
   const l = tracers.find((t) => !t.visible) || tracers[0];
@@ -583,22 +641,20 @@ function fx(dt) {
 
 // ---------------- камера, свет, небо
 const _fw = new THREE.Vector3(), _cv = new THREE.Vector3(), _ct = {};
+let bobT = 0, dayKNow = 1, inK = 0;
+const isFP = () => running && player && player.mode !== 'cab';
 function updateCamera(dt) {
   const L = train.loco.g, yaw = L.rotation.y;
   const foot = running && player && player.mode !== 'cab';
   if (foot) {
-    const p = player.pos, dist = player.mode === 'roof' ? 6 : 4.6, a = fcam.yaw, pc = Math.cos(fcam.pitch);
-    _fw.set(p.x + Math.sin(a) * dist * pc + Math.cos(a) * 0.7, p.y + 1.7 + Math.sin(fcam.pitch) * dist, p.z + Math.cos(a) * dist * pc - Math.sin(a) * 0.7);
-    // камера не заходит в поезд и в дома
-    toTrack(_fw.x, _fw.z, _ct);
-    if (_ct.s < train.s + 1.5 && _ct.s > train.sRear - 1.5 && Math.abs(_ct.d) < 2.2 && _fw.y < 6.3) {
-      if (player.mode === 'roof') _fw.y = 6.4;
-      else { toTrack(p.x, p.z, _tt); const sg = _tt.d >= 0 ? 1 : -1; worldPos(_ct.s, sg * 2.2, 0, _cv); _fw.x = _cv.x; _fw.z = _cv.z; }
-    }
-    const cc = world.collide(_ct.s, _ct.d, 0.3); if (cc.hit) { worldPos(cc.s, cc.d, 0, _cv); _fw.x = _cv.x; _fw.z = _cv.z; }
-    camPos.lerp(_fw, Math.min(1, dt * 12)); if (camPos.distanceTo(_fw) > 20) camPos.copy(_fw);
-    camera.position.copy(camPos);
-    camera.lookAt(p.x - Math.sin(a) * 6 + Math.cos(a) * 0.7, p.y + 1.5, p.z - Math.cos(a) * 6 - Math.sin(a) * 0.7);
+    // вид от первого лица: глаза игрока, лёгкое покачивание при ходьбе
+    const p = player.pos, eye = 1.62 - 0.6 * player.crouchK;
+    bobT += dt * (player.running ? 13 : 9) * Math.min(1, player.moving / 1.4);
+    const bob = player.busy ? 0 : Math.min(1, player.moving / 1.4) * (player.running ? 0.055 : 0.03);
+    const yw = fcam.yaw, pt = fcam.pitch;
+    camera.position.set(p.x + Math.cos(yw) * Math.sin(bobT) * bob * 0.5, p.y + eye + Math.abs(Math.cos(bobT)) * bob, p.z - Math.sin(yw) * Math.sin(bobT) * bob * 0.5);
+    camPos.copy(camera.position);
+    camera.lookAt(camera.position.x - Math.sin(yw) * Math.cos(pt), camera.position.y + Math.sin(pt), camera.position.z - Math.cos(yw) * Math.cos(pt));
   } else if (camMode === 'cab' && running) {
     L.localToWorld(camPos.copy(train.loco.cabCam));
     camera.position.copy(camPos);
@@ -617,7 +673,7 @@ function updateCamera(dt) {
   $('#cabframe').hidden = !(camMode === 'cab' && !foot && running);
   if (!S) return;
   const t = S.time, elev = Math.sin((t - 6) / 12 * Math.PI);
-  const dayK = clamp(elev * 2.2 + 0.25, 0, 1), dusk = clamp(1 - Math.abs(elev) * 4, 0, 1) * (elev > -0.3 ? 1 : 0);
+  const dayK = clamp(elev * 2.2 + 0.25, 0, 1); dayKNow = dayK; const dusk = clamp(1 - Math.abs(elev) * 4, 0, 1) * (elev > -0.3 ? 1 : 0);
   const w = S.weather.type, over = w === 'clear' ? 0 : w === 'cloudy' ? 0.5 : 0.8;
   const sky = _c1.setRGB(0.05, 0.07, 0.12).lerp(_c2.setRGB(0.55 - over * 0.12, 0.67 - over * 0.1, 0.78 - over * 0.12), dayK).lerp(_c3.setRGB(0.85, 0.55, 0.38), dusk * 0.45 * (1 - over * 0.6));
   if (env().season === 'winter') sky.lerp(_c2.setRGB(0.75, 0.8, 0.86), 0.25 * dayK);
@@ -630,7 +686,9 @@ function updateCamera(dt) {
   scene.environmentIntensity = 0.12 + 0.75 * dayK * (1 - over * 0.4);
   const fogK = { clear: 1, cloudy: 0.85, rain: 0.55, fog: 0.22, snow: 0.45 }[w];
   scene.fog.far = lerp(170, 430, dayK) * fogK + 20; scene.fog.near = 8 + 30 * fogK * dayK;
-  hemi.intensity = 0.28 + 0.45 * dayK; sun.intensity = 2.6 * dayK * (1 - over * 0.65);
+  inK += ((player && player.mode === 'inside' ? 1 : 0) - inK) * Math.min(1, dt * 3);
+  hemi.intensity = (0.28 + 0.45 * dayK) * (1 - 0.45 * inK); sun.intensity = 2.6 * dayK * (1 - over * 0.65);
+  scene.environmentIntensity *= 1 - 0.4 * inK;
   sun.castShadow = dayK > 0.15 && over < 0.7;
   const fx0 = foot ? player.pos.x : camPos.x, fz0 = foot ? player.pos.z : camPos.z;
   sun.target.position.set(fx0, 0, fz0);
@@ -705,7 +763,7 @@ canvas.addEventListener('pointermove', (e) => {
   ptr.x = e.clientX; ptr.y = e.clientY;
   if (!ptr.drag && Math.hypot(ptr.x - ptr.sx, ptr.y - ptr.sy) > 12) ptr.drag = true;
   if (ptr.drag) {
-    if (player.mode !== 'cab') { fcam.yaw -= dx * 0.007; fcam.pitch = clamp(fcam.pitch + dy * 0.004, -0.25, 1.1); }
+    if (player.mode !== 'cab') { fcam.yaw -= dx * 0.0065; fcam.pitch = clamp(fcam.pitch - dy * 0.0055, -1.35, 1.35); }
     else if (camMode === 'cab') { look.yaw = clamp(look.yaw - dx * 0.005, -1.6, 1.6); look.pitch = clamp(look.pitch - dy * 0.004, -0.6, 0.5); }
     else { orbit.yaw -= dx * 0.008; orbit.h = clamp(orbit.h + dy * 0.04, 2.5, 30); }
   }
@@ -798,6 +856,9 @@ function act(a, ds) {
     case 'exit': exitCab(); break;
     case 'enter': enterCab(false); break;
     case 'up': { const sp = trainSpots()[+ds.i]; if (sp) climbUp(sp); break; }
+    case 'incar': { const sp = trainSpots()[+ds.i]; if (sp) enterCar(sp); break; }
+    case 'outcar': { const sp = trainSpots()[+ds.i]; if (sp) exitCar(sp); break; }
+    case 'sleep': sleep(); break;
     case 'down': { const sp = trainSpots()[+ds.i]; if (sp) climbDown(sp); break; }
     case 'loot': { const L = world.loot.get(ds.id); if (L) startTask('loot', L); break; }
     case 'clear': { const o = world.obstacles.get(ds.id); if (o) startTask('clear', o); break; }
@@ -1175,12 +1236,17 @@ function contextActions() {
     if (player.mode === 'cab') {
       if (Math.abs(train.v) < 0.4) B('exit', 'Выйти');
       if (st) B('trade', 'Торговля', '', 'gold');
+    } else if (player.mode === 'inside') {
+      const dn = carDoorNear(); if (dn) B('outcar', 'Выйти из вагона', `data-i="${trainSpots().indexOf(dn)}"`, 'gold');
+      if (berthNear()) B('sleep', 'Поспать');
+      B('inv', 'Склад вагона');
     } else if (player.mode === 'roof') {
       trainSpots().forEach((sp, i) => { if (sp.kind === 'ladder' && Math.abs(player.off - sp.top) < 1.6 && (player.d >= 0 ? 1 : -1) === sp.f) B('down', 'Спуститься', `data-i="${i}"`); });
     } else {
       trainSpots().forEach((sp, i) => {
         const d = spotPos(sp).distanceTo(player.pos);
         if (sp.kind === 'door' && d < 2.4) B('enter', 'В кабину', '', 'gold');
+        if (sp.kind === 'cardoor' && d < 2.2 && Math.abs(train.v) < 0.4) B('incar', 'Войти в вагон', `data-i="${i}"`, 'gold');
         if (sp.kind === 'ladder' && d < 1.8) B('up', 'На крышу', `data-i="${i}"`);
       });
       if (st) B('trade', 'Торговля', '', 'gold');
@@ -1213,7 +1279,7 @@ function trainSound() {
   const dt = 1 / 60, v = train.v;
   const dTM = (train.TM - prevTM) / dt; prevTM = train.TM;
   const curve = Math.abs(trackDX(train.s + 5) - trackDX(train.s - 5)) / 10;
-  const view = player.mode !== 'cab' ? 'foot' : camMode === 'cab' ? 'cab' : 'chase';
+  const view = player.mode === 'inside' ? 'inside' : player.mode !== 'cab' ? 'foot' : camMode === 'cab' ? 'cab' : 'chase';
   const dist = view === 'foot' ? player.pos.distanceTo(train.loco.g.position) : 0;
   audio.train({ v, rpm: train.rpm, load: train.pos / 15, on: train.engine, starting: train.starting > 0 ? 1 - train.starting / 3.2 : 0, TC: train.TC, dTM, brake: train.brake, curve, view, dist });
   // трогание и остановка: лязг автосцепок, сброс воздуха
@@ -1222,7 +1288,7 @@ function trainSound() {
   if (stopT > 0) { stopT -= dt; if (stopT <= 0) audio.play('stop_hiss', { vol: 0.9 }); }
   prevV = v;
   const w = S.weather.type, season = env().season;
-  const outside = player.mode !== 'cab' || camMode !== 'cab';
+  const outside = (player.mode !== 'cab' && player.mode !== 'inside') || (player.mode === 'cab' && camMode !== 'cab');
   const day = S.time > 6 && S.time < 20, zone = world.zoneAt(train.s);
   audio.ambience({ windK: { clear: 0.3, cloudy: 0.6, rain: 1, fog: 0.4, snow: 1.2 }[w] || 0.5, speed: player.mode === 'cab' ? Math.abs(v) : 0, winter: season === 'winter',
     rain: w === 'rain', outside, birds: day && season !== 'winter' && w !== 'rain' && Math.abs(v) < 8 && zone !== 'industrial', searching: !!task });
@@ -1278,7 +1344,7 @@ async function boot() {
   resize(); bindUi(); showTitle(); audio.preload();
   requestAnimationFrame(frame);
   let a = 0, b = 0, c = 0; const pr = () => ($('#loadbar u').style.width = ((a * 0.3 + b * 0.4 + c * 0.3) * 100) + '%');
-  await Promise.all([loadTextures((k) => { a = k; pr(); }), loadChars((k) => { b = k; pr(); }), loadPacks(['train_pack', 'nature_pack'], (k) => { c = k; pr(); })]);
+  await Promise.all([loadTextures((k) => { a = k; pr(); }), loadChars((k) => { b = k; pr(); }), loadPacks(['train_pack', 'nature_pack', 'guns_pack'], (k) => { c = k; pr(); })]);
   player = new Player(scene); player.onStep = footstep;
   S = newState(12345); buildTrain(null); setupWorld(); train.place(0); player.mode = 'cab';
   orbit.yaw = 0.9; orbit.h = 4; S.time = 17.9;

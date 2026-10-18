@@ -5,6 +5,7 @@ import {
 } from './util.js';
 import { NAMES_F, NAMES_N, NAMES_PL, NAMES_M, MOD, SETTLEMENT_NAMES, FACTORIES } from './data.js';
 import { makeWreck, makeTank, makeCar } from './models.js';
+import { makePassCar } from './rolling.js';
 import { packGeo, PACK_MAT } from './packs.js';
 import { Char } from './chars.js';
 
@@ -75,7 +76,7 @@ export class World {
     if (kind === 'depot') st.settle = 'Депо';
     if (kind !== 'halt') {
       st.wagons = []; const n = RI(r, 1, 5); let ws = st.s - 170;
-      for (let i = 0; i < n && ws < st.s + 160; i++) { ws += R(r, 16, 70); st.wagons.push({ s: ws, tank: r() < 0.3, id: `w${k}.${i}`, tint: r() }); }
+      for (let i = 0; i < n && ws < st.s + 160; i++) { ws += R(r, 27, 70); st.wagons.push({ s: ws, tank: r() < 0.3, id: `w${k}.${i}`, tint: r() }); }
     }
     this.stations.push(st);
   }
@@ -305,11 +306,12 @@ export class World {
       if (st.s + 190 > ctx.s0 && st.s - 190 < ctx.s1) ctx.bands.push([Math.min(off - 3, off + 3), Math.max(off - 3, off + 3)]);
       for (const w of st.wagons) if (w.s >= ctx.s0 && w.s < ctx.s1) {
         const wr = rngOf(this.seed, 505, st.k, w.s | 0);
-        const m = w.tank ? makeTank(wr) : makeWreck(wr);
+        const pass = !w.tank && wr() < 0.55;
+        const m = w.tank ? makeTank(wr) : pass ? Object.assign(makePassCar(RI(wr, 1, 18)), { label: 'Брошенный плацкартный вагон' }) : makeWreck(wr);
         this.place(ctx, m.g, w.s, off, 0, 0.64);
         if (wr() < 0.15 && !w.tank) m.g.rotation.z = 0.05;
         const fp = worldPos(w.s, off + sgn * 2.2);
-        const L = { id: w.id, type: w.tank ? 'wagon_tank' : 'wagon_box', label: w.tank ? 'Брошенная цистерна' : m.label, s: w.s, d: off, x: fp.x, z: fp.z };
+        const L = { id: w.id, type: w.tank ? 'wagon_tank' : pass ? 'wagon_pass' : 'wagon_box', label: w.tank ? 'Брошенная цистерна' : m.label, s: w.s, d: off, x: fp.x, z: fp.z };
         ctx.loot.push(L); this.loot.set(L.id, L);
       }
     }

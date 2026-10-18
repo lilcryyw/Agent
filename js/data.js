@@ -140,7 +140,7 @@ export const WAGON_CARGO = [
 export const LOOT_TIME = {
   house: 6, dacha: 5, apartment: 10, shop_food: 8, shop_med: 7, shop_hoz: 7, shop_auto: 7, shop_hunt: 8, kiosk: 3,
   garage: 6, factory: 11, station: 8, church: 7, police: 9, hospital: 10, school: 9, azs: 6, military: 12, car: 3,
-  ruins: 4, wagon_box: 6, wagon_tank: 7,
+  ruins: 4, wagon_box: 6, wagon_tank: 7, wagon_pass: 9,
 };
 
 export const UPGRADES = {
