@@ -1,47 +1,55 @@
-// Звук: настоящие записи (OpenGameArt CC0, Kenney CC0, Wikimedia Commons) + немного синтеза для сигналов пульта.
+// Звук: настоящие записи (Red Library — CC0, Archive.org; OpenGameArt CC0; Kenney CC0).
+// Поезд собран из слоёв: дизель, колёса, кабина, скрежет колодок, визг гребней, воздух.
 const LIST = {
-  z_moan: [1, 6], z_growl: [1, 10], z_attack: [1, 3], z_scream: null, z_death: [1, 2],
-  st_grass: [0, 3], st_concrete: [0, 3], st_snow: [0, 3], st_wood: [0, 3], st_metal: [0, 3], st_gravel: [0, 3],
-  g_pm: null, g_bizon: null, g_toz: null, g_ak: null, g_svd: null, g_turret: null, g_reload: null, g_reload2: null, g_cock: null, g_empty: null,
-  hit_metal: [0, 2], flesh: [1, 3], body_fall: null, clack: null, clack2: null, smash_wood: null, smash_metal: null,
-  cloth: [1, 4], coins: null, drop: null, latch: null, door_open: null, door_close: null, eat: [1, 3], drink: [1, 2], bottle: null,
-  horn: null, hiss: [1, 2], engine: null, rumble: null, wind: null, crows: null,
+  // зомби
+  z_moan: [1, 6], z_growl: [1, 10], z_grunt: [0, 4], z_mmoan: [0, 3], z_attack: [1, 3], z_scream: null, z_death: [1, 2], z_step: [0, 5], z_drag: [0, 2],
+  // шаги
+  st_grass: [0, 3], st_concrete: [0, 5], st_snow: [0, 5], st_wood: [0, 3], st_metal: [0, 5], st_gravel: [0, 5],
+  // оружие
+  g_pm: [0, 2], g_bizon: null, g_toz: null, g_ak: null, g_rifle: null, g_svd: null, g_turret: null, g_reload: null, g_cock: null, g_empty: null,
+  // удары, тела
+  hit_metal: [0, 2], clank: [0, 5], flesh: [1, 3], impact: [0, 2], punch: [0, 3], body_fall: [0, 1], smash_wood: null, smash_metal: null, breath: [0, 2],
+  // быт
+  cloth: [1, 4], coins: null, drop: null, eat: [1, 3], drink: [1, 2], bottle: null, rummage: null, door_handle: null, door_slam: null, door_slide: null,
+  // поезд
+  diesel_idle: null, wheels: null, cab_ride: null, train_pass: null, brake_squeal: null, flange: null, air_loop: null,
+  horn: null, coupling: null, stop_hiss: null, air_release: null, brake_apply: null, air_emerg: null, clack: null, clack2: null,
+  // природа
+  wind: null, wind_cold: null, rain: null, thunder: null, birds: null, owl: null,
 };
 const FILES = [];
 for (const [k, v] of Object.entries(LIST)) if (v) for (let i = v[0]; i <= v[1]; i++) FILES.push(k + i); else FILES.push(k);
+const LOOPS = ['diesel_idle', 'wheels', 'cab_ride', 'train_pass', 'brake_squeal', 'flange', 'air_loop', 'wind', 'wind_cold', 'rain', 'birds', 'rummage'];
 
 export class Audio {
-  constructor() { this.ctx = null; this.on = true; this.raw = {}; this.buf = {}; this.voices = 0; }
-  // скачать заранее (до касания экрана декодировать нельзя)
+  constructor() { this.ctx = null; this.on = true; this.raw = {}; this.buf = {}; this.voices = 0; this.L = {}; this.ready = false; }
   preload(base = 'assets/sfx/') {
     this.loading = Promise.all(FILES.map((f) => fetch(base + f + '.mp3').then((r) => (r.ok ? r.arrayBuffer() : null)).then((b) => { if (b) this.raw[f] = b; }).catch(() => {})));
     return this.loading;
   }
   init() {
+    // iPhone: играть даже при выключенном звонке (переключатель «бесшумно»)
+    try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) { /* старый iOS */ }
     if (this.ctx) { if (this.ctx.state !== 'running') this.ctx.resume(); return; }
     const AC = window.AudioContext || window.webkitAudioContext;
     if (!AC) return;
     const c = this.ctx = new AC();
-    this.comp = c.createDynamicsCompressor(); this.comp.threshold.value = -14; this.comp.ratio.value = 4;
-    this.master = c.createGain(); this.master.gain.value = 0.9;
+    this.comp = c.createDynamicsCompressor(); this.comp.threshold.value = -16; this.comp.ratio.value = 4;
+    this.master = c.createGain(); this.master.gain.value = this.on ? 0.95 : 0;
     this.master.connect(this.comp); this.comp.connect(c.destination);
-    // шумовой буфер для синтеза
-    const len = c.sampleRate * 2, nb = c.createBuffer(1, len, c.sampleRate), d = nb.getChannelData(0);
+    const len = c.sampleRate, nb = c.createBuffer(1, len, c.sampleRate), d = nb.getChannelData(0);
     for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
     this.noise = nb;
-    this.hissN = this.loopNoise('highpass', 2500);
-    this.slipS = this.loopNoise('bandpass', 1400);
-    // низкий синтезированный «пульс» дизеля поверх записи
-    this.puls = c.createGain(); this.puls.gain.value = 0;
-    const lp = c.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 160;
-    this.po = c.createOscillator(); this.po.type = 'sawtooth'; this.po.connect(lp); lp.connect(this.puls); this.puls.connect(this.master); this.po.start();
+    // на старых iPhone без audioSession — «разбудить» звук тихим тегом <audio>
+    if (!navigator.audioSession) {
+      try { const a = document.createElement('audio'); a.src = 'data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4LjI5LjEwMAAAAAAAAAAAAAAA//tQAAAAAAAAAAAAAAAAAAAAAAAASW5mbwAAAA8AAAABAAADQgD///////////////////////////////////////////8AAAA5TEFNRTMuMTAwAZYAAAAAAAAAABQ4JAMGQgAAOAAAA0LeZ8a4AAAAAAAAAAAAAAAAAAAA'; a.loop = true; a.volume = 0.01; a.play().catch(() => {}); this.keep = a; } catch (e) { /* нет */ }
+    }
+    const unlock = () => { if (c.state !== 'running') c.resume(); };
+    addEventListener('touchend', unlock, { passive: true }); addEventListener('click', unlock);
     const decode = () => Promise.all(Object.entries(this.raw).map(([k, b]) => new Promise((res) => {
       try { c.decodeAudioData(b.slice(0), (x) => { this.buf[k] = x; res(); }, () => res()); } catch (e) { res(); }
-    }))).then(() => this.startLoops());
+    }))).then(() => { for (const n of LOOPS) this.L[n] = this.loop(n); this.ready = true; });
     (this.loading || Promise.resolve()).then(decode);
-  }
-  startLoops() {
-    this.eng = this.loop('engine'); this.rum = this.loop('rumble'); this.wnd = this.loop('wind');
   }
   loop(name) {
     const b = this.buf[name]; if (!b) return null;
@@ -50,15 +58,13 @@ export class Audio {
     s.connect(g); g.connect(this.master); s.start(0, Math.random() * b.duration);
     return { s, g };
   }
-  loopNoise(type, freq) {
-    const c = this.ctx, s = c.createBufferSource(); s.buffer = this.noise; s.loop = true;
-    const f = c.createBiquadFilter(); f.type = type; f.frequency.value = freq;
-    const g = c.createGain(); g.gain.value = 0;
-    s.connect(f); f.connect(g); g.connect(this.master); s.start();
-    return g;
+  lv(name, vol, rate, t = 0.25) {
+    const l = this.L[name]; if (!l || !this.ctx) return;
+    const now = this.ctx.currentTime;
+    l.g.gain.setTargetAtTime(Math.max(0, vol), now, t);
+    if (rate) l.s.playbackRate.setTargetAtTime(rate, now, t);
   }
-  set(g, v, t = 0.08) { if (this.ctx && g) (g.gain || g).setTargetAtTime(this.on ? v : 0, this.ctx.currentTime, t); }
-  // слушатель — камера
+  setOn(on) { this.on = on; if (this.master) this.master.gain.value = on ? 0.95 : 0; }
   listen(p, f) {
     if (!this.ctx) return;
     const L = this.ctx.listener, t = this.ctx.currentTime;
@@ -68,19 +74,18 @@ export class Audio {
       L.upX.setValueAtTime(0, t); L.upY.setValueAtTime(1, t); L.upZ.setValueAtTime(0, t);
     } else { L.setPosition(p.x, p.y, p.z); L.setOrientation(f.x, f.y, f.z, 0, 1, 0); }
   }
-  // проиграть запись; name — база, вариант выбирается случайно
   play(name, o = {}) {
     if (!this.ctx || !this.on) return null;
     const v = LIST[name];
     const key = v ? name + (v[0] + Math.floor(Math.random() * (v[1] - v[0] + 1))) : name;
     const b = this.buf[key]; if (!b) return null;
-    if (this.voices > 28 && !o.must) return null;
+    if (this.voices > 32 && !o.must) return null;
     const c = this.ctx, s = c.createBufferSource(); s.buffer = b;
     s.playbackRate.value = (o.rate || 1) * (o.vary ? 1 + (Math.random() - 0.5) * o.vary : 1);
     const g = c.createGain(); g.gain.value = o.vol ?? 1;
     let out = g;
     if (o.pos) {
-      const pn = c.createPanner(); pn.panningModel = 'equalpower'; pn.distanceModel = 'inverse'; pn.refDistance = o.ref || 3; pn.maxDistance = 120; pn.rolloffFactor = o.roll || 1.3;
+      const pn = c.createPanner(); pn.panningModel = 'equalpower'; pn.distanceModel = 'inverse'; pn.refDistance = o.ref || 3; pn.maxDistance = 150; pn.rolloffFactor = o.roll || 1.2;
       if (pn.positionX) { pn.positionX.value = o.pos.x; pn.positionY.value = o.pos.y + 1.2; pn.positionZ.value = o.pos.z; } else pn.setPosition(o.pos.x, o.pos.y + 1.2, o.pos.z);
       g.connect(pn); out = pn;
     }
@@ -89,53 +94,61 @@ export class Audio {
     s.start(c.currentTime + (o.delay || 0));
     return { s, g };
   }
-  // ---- поезд
-  engine(rpm, load, on) {
-    if (!this.ctx) return;
-    const t = this.ctx.currentTime;
-    if (this.eng) {
-      this.eng.s.playbackRate.setTargetAtTime(0.45 + rpm / 1000 * 0.75, t, 0.25);
-      this.set(this.eng.g, on ? 0.35 + load * 0.45 : rpm > 60 ? 0.2 : 0, 0.3);
-    }
-    this.po.frequency.setTargetAtTime(14 + rpm / 1000 * 30, t, 0.2);
-    this.set(this.puls, on ? 0.06 + load * 0.12 : 0, 0.3);
+
+  // ---- поезд: вызывается каждый кадр
+  // t: { v, rpm, load, on, starting, TC, dTM, brake, curve, view: 'cab'|'chase'|'foot', dist }
+  train(t) {
+    if (!this.ready) return;
+    const v = Math.abs(t.v), near = t.view === 'foot' ? Math.max(0.12, Math.min(1, 14 / (t.dist + 4))) : 1;
+    // дизель: обороты меняют высоту, нагрузка — громкость
+    const dRate = t.on ? 0.78 + t.rpm / 1000 * 0.75 : t.starting ? 0.5 + t.starting * 0.4 : 0.6;
+    this.lv('diesel_idle', (t.on ? 0.45 + t.load * 0.55 : t.starting ? 0.35 : 0) * (t.view === 'cab' ? 0.8 : 1) * near, dRate, 0.35);
+    // колёса: от скорости зависят и ритм, и громкость
+    const wv = Math.min(1, v / 14);
+    this.lv('wheels', wv * (t.view === 'cab' ? 0.55 : 0.85) * near, 0.55 + Math.min(v, 28) / 28 * 0.75, 0.3);
+    this.lv('cab_ride', t.view === 'cab' ? Math.min(0.9, v / 18) : 0, 0.7 + Math.min(v, 28) / 28 * 0.5, 0.4);
+    this.lv('train_pass', t.view === 'foot' ? Math.min(1, v / 10) * near * 0.9 : 0, 0.8 + Math.min(v, 25) / 25 * 0.4, 0.4);
+    // скрежет колодок: сильнее при давлении в цилиндрах и на малой скорости
+    const sq = t.TC > 0.6 && v > 0.25 ? (t.TC / 3.8) * Math.min(1, v / 1.5) * (1 - Math.min(1, v / 22)) * 1.3 : 0;
+    this.lv('brake_squeal', sq * near, 0.9 + Math.min(v, 10) / 10 * 0.2, 0.15);
+    // визг гребней в кривых
+    this.lv('flange', v > 6 && t.curve > 0.00006 ? Math.min(0.6, (t.curve - 0.00006) * 4000) * Math.min(1, v / 15) * near : 0, 1, 0.5);
+    // выпуск воздуха краном машиниста
+    this.lv('air_loop', t.dTM < -0.05 ? Math.min(0.8, -t.dTM * 0.6) : 0, 1, 0.1);
   }
-  rolling(v) {
-    if (!this.ctx) return;
-    const a = Math.abs(v);
-    if (this.rum) { this.rum.s.playbackRate.setTargetAtTime(0.7 + Math.min(a, 28) / 28 * 0.6, this.ctx.currentTime, 0.4); this.set(this.rum.g, Math.min(0.55, a / 30), 0.4); }
+  ambience(o) {
+    if (!this.ready) return;
+    const out = o.outside ? 1 : 0.45;
+    this.lv('wind', (o.windK * 0.35 + Math.min(0.35, o.speed / 60)) * out * (o.winter ? 0.3 : 1), 1, 1);
+    this.lv('wind_cold', o.winter ? (0.25 + o.windK * 0.3) * out : 0, 1, 1);
+    this.lv('rain', o.rain ? 0.55 * out : 0, 1, 1.2);
+    this.lv('birds', o.birds ? 0.22 * out : 0, 1, 2);
+    this.lv('rummage', o.searching ? 0.8 : 0, 1, 0.2);
   }
-  ambience(wind, speed) { if (this.wnd) this.set(this.wnd.g, Math.min(0.45, wind * 0.25 + Math.abs(speed) / 90), 0.8); }
-  clack(v, offsets) {
-    if (v < 1) return;
-    const vol = Math.min(0.9, 0.2 + v / 30);
-    for (const o of offsets) this.play(Math.random() < 0.5 ? 'clack' : 'clack2', { vol, rate: 0.85 + Math.random() * 0.15, delay: o / v });
-  }
+  // ---- события поезда
   hornOn() {
     if (!this.ctx || this.hornV) return;
     const b = this.buf.horn; if (!b) return;
-    const s = this.ctx.createBufferSource(); s.buffer = b; s.loop = true; s.loopStart = 0.9; s.loopEnd = 2.6;
-    const g = this.ctx.createGain(); g.gain.value = this.on ? 0.8 : 0;
+    const s = this.ctx.createBufferSource(); s.buffer = b; s.loop = true; s.loopStart = 0.7; s.loopEnd = Math.min(b.duration - 0.6, 2.6);
+    const g = this.ctx.createGain(); g.gain.value = this.on ? 1 : 0;
     s.connect(g); g.connect(this.master); s.start();
     this.hornV = { s, g };
   }
   hornOff() {
     if (!this.hornV) return;
     const { s, g } = this.hornV, t = this.ctx.currentTime;
-    g.gain.setTargetAtTime(0, t, 0.12); s.stop(t + 0.8); this.hornV = null;
+    g.gain.setTargetAtTime(0, t, 0.15); s.stop(t + 1); this.hornV = null;
   }
-  // ---- выстрелы и прочее
+  clack(v, offsets, vol = 1) {
+    if (v < 1) return;
+    const k = Math.min(0.8, 0.15 + v / 35) * vol;
+    for (const o of offsets) this.play(Math.random() < 0.5 ? 'clack' : 'clack2', { vol: k, rate: 0.75 + Math.random() * 0.15, delay: o / v });
+  }
+  couplers(n, vol = 1) { for (let i = 0; i < n; i++) this.play('clank', { vol: vol * (1 - i * 0.12), rate: 0.75 + Math.random() * 0.2, delay: i * 0.35 + Math.random() * 0.1 }); }
+  // ---- оружие и прочее
   shot(kind) {
     const map = { pistol: 'g_pm', smg: 'g_bizon', rifle: 'g_ak', shotgun: 'g_toz', sniper: 'g_svd', turret: 'g_turret' };
-    if (!this.play(map[kind] || 'g_pm', { vol: 0.9, vary: 0.06, must: true })) this.burst(0.15, 1200, 'lowpass', 0.5);
-  }
-  burst(dur, freq, type, vol, when = 0, q = 1) {
-    if (!this.ctx || !this.on) return;
-    const c = this.ctx, t = c.currentTime + when;
-    const s = c.createBufferSource(); s.buffer = this.noise;
-    const f = c.createBiquadFilter(); f.type = type; f.frequency.value = freq; f.Q.value = q;
-    const g = c.createGain(); g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
-    s.connect(f); f.connect(g); g.connect(this.master); s.start(t, Math.random()); s.stop(t + dur + 0.05);
+    this.play(map[kind] || 'g_pm', { vol: 0.95, vary: 0.05, must: true });
   }
   tone(freq, dur, type = 'sine', vol = 0.2, when = 0, slide = 0) {
     if (!this.ctx || !this.on) return;
@@ -145,13 +158,25 @@ export class Audio {
     const g = c.createGain(); g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
     o.connect(g); g.connect(this.master); o.start(t); o.stop(t + dur + 0.05);
   }
-  groan(vol, pos, runner) { this.play(runner || Math.random() < 0.4 ? 'z_growl' : 'z_moan', { pos, vol: 0.9 * vol + 0.3, vary: 0.15 }); }
+  burst(dur, freq, type, vol, when = 0) {
+    if (!this.ctx || !this.on) return;
+    const c = this.ctx, t = c.currentTime + when;
+    const s = c.createBufferSource(); s.buffer = this.noise;
+    const f = c.createBiquadFilter(); f.type = type; f.frequency.value = freq;
+    const g = c.createGain(); g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    s.connect(f); f.connect(g); g.connect(this.master); s.start(t); s.stop(t + dur + 0.05);
+  }
+  groan(vol, pos, runner) {
+    const pool = runner ? ['z_growl', 'z_grunt'] : ['z_moan', 'z_mmoan', 'z_growl'];
+    this.play(pool[Math.floor(Math.random() * pool.length)], { pos, vol: 0.8 * vol + 0.35, vary: 0.15 });
+  }
   scream(pos) { this.play('z_scream', { pos, vol: 1.2, ref: 8, must: true }); }
-  splat(pos) { this.play('flesh', { pos, vol: 1, vary: 0.1 }); this.play('hit_metal', { vol: 0.5, rate: 0.7 }); }
-  thud() { this.play('hit_metal', { vol: 0.7, vary: 0.2 }); }
+  splat(pos) { this.play('flesh', { pos, vol: 1, vary: 0.1 }); this.play('clank', { pos, vol: 0.7, rate: 0.8 }); }
+  thud() { this.play('clank', { vol: 0.7, vary: 0.2 }); }
   beep() { for (let i = 0; i < 3; i++) this.tone(1000, 0.12, 'square', 0.08, i * 0.25); }
   alarm() { for (let i = 0; i < 4; i++) { this.tone(700, 0.18, 'square', 0.1, i * 0.4); this.tone(500, 0.18, 'square', 0.1, i * 0.4 + 0.2); } }
-  starter() { this.burst(2.5, 600, 'bandpass', 0.25, 0, 3); this.tone(40, 3, 'sawtooth', 0.15, 0, 20); this.play('latch', { vol: 0.6 }); }
-  click() { if (!this.play('latch', { vol: 0.35, rate: 1.6 })) this.burst(0.03, 3000, 'highpass', 0.15); }
-  coin() { if (!this.play('coins', { vol: 0.7 })) { this.tone(1200, 0.1, 'triangle', 0.12); this.tone(1600, 0.15, 'triangle', 0.12, 0.08); } }
+  starter() { this.burst(1.8, 900, 'bandpass', 0.18); this.tone(55, 2.2, 'sawtooth', 0.12, 0, 30); this.play('door_handle', { vol: 0.5 }); }
+  click() { this.play('door_handle', { vol: 0.25, rate: 2.2 }); }
+  notch() { this.play('g_reload', { vol: 0.35, rate: 1.6, vary: 0.1 }); }
+  coin() { this.play('coins', { vol: 0.7 }); }
 }

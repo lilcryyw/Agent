@@ -61,8 +61,7 @@ export class Player {
       const a = -o, b = -o - c.len;
       if (off <= a + 0.3 && off >= b - 0.3) {
         const local = -(off - (a - c.len / 2));
-        if (c.kind === 'loco') return local > -3.9 && local < 7.1 ? 5.8 : 5.49;
-        return c.kind === 'tank' ? 5.15 : 5.79;
+        return c.roofY(local) + 0.64;
       }
       o += c.len + 0.6;
     }

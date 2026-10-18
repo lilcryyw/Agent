@@ -51,17 +51,23 @@ export function toTrack(x, z, o = {}) {
 // ---------- текстуры и материалы
 export const T = {};
 const matCache = new Map();
+// гладкие PBR-материалы: цвет + карта нормалей (рельеф кирпича, досок, гравия)
 export function M(tex, color = 0xffffff, opts) {
   const key = tex + '|' + color + (opts ? JSON.stringify(opts) : '');
   let m = matCache.get(key);
-  if (!m) { m = new THREE.MeshLambertMaterial({ map: tex ? T[tex] : null, color, ...(opts || {}) }); matCache.set(key, m); }
+  if (!m) {
+    const nm = tex ? T[tex + '_n'] : null;
+    m = new THREE.MeshStandardMaterial({ map: tex ? T[tex] : null, normalMap: nm || null, color, roughness: 0.92, metalness: 0, ...(opts || {}) });
+    if (nm) m.normalScale.set(0.9, 0.9);
+    matCache.set(key, m);
+  }
   return m;
 }
 export const C = (color, opts) => M(null, color, opts);
 const phongCache = new Map();
 export function P(color, shin = 60) {
   const k = color + '|' + shin; let m = phongCache.get(k);
-  if (!m) { m = new THREE.MeshPhongMaterial({ color, shininess: shin, specular: 0x555555 }); phongCache.set(k, m); }
+  if (!m) { m = new THREE.MeshStandardMaterial({ color, roughness: clamp(1 - shin / 110, 0.2, 0.9), metalness: shin >= 50 ? 0.45 : 0.1 }); phongCache.set(k, m); }
   return m;
 }
 const basicCache = new Map();
@@ -204,7 +210,7 @@ export function signMat(text, bg = '#1f4e8c', fg = '#ffffff', border = true) {
   while (x.measureText(text).width > 470 && fs > 20) { fs -= 4; x.font = `bold ${fs}px "Arial Narrow", Arial, sans-serif`; }
   x.textAlign = 'center'; x.textBaseline = 'middle'; x.fillText(text, 256, 58);
   const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4;
-  m = new THREE.MeshLambertMaterial({ map: t });
+  m = new THREE.MeshStandardMaterial({ map: t, roughness: 0.7 });
   if (signCache.size > 120) { const k0 = signCache.keys().next().value; signCache.get(k0).map.dispose(); signCache.delete(k0); }
   signCache.set(key, m);
   return m;

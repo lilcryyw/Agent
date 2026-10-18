@@ -4,7 +4,8 @@ import {
   gableGeo, QuadBatch, ribbon, sign, disposeTree,
 } from './util.js';
 import { NAMES_F, NAMES_N, NAMES_PL, NAMES_M, MOD, SETTLEMENT_NAMES, FACTORIES } from './data.js';
-import { makeBoxcar, makeTank, makeCar } from './models.js';
+import { makeWreck, makeTank, makeCar } from './models.js';
+import { packGeo, PACK_MAT } from './packs.js';
 import { Char } from './chars.js';
 
 export const CHUNK = 100;
@@ -21,8 +22,8 @@ const ROOF_T = [0x9a4a3a, 0x4f7a5a, 0x8a8f96, 0xffffff, 0x3f5f8f, 0x6a6a6a];
 // ---------- общие геометрии
 const G = {
   trunk: shared(new THREE.CylinderGeometry(0.6, 1, 1, 6).translate(0, 0.5, 0)),
-  ico: shared(new THREE.IcosahedronGeometry(1, 0)),
-  cone: shared(new THREE.ConeGeometry(1, 1, 7).translate(0, 0.5, 0)),
+  ico: shared(new THREE.IcosahedronGeometry(1, 2)),
+  cone: shared(new THREE.ConeGeometry(1, 1, 12).translate(0, 0.5, 0)),
   sleeper: shared(new THREE.BoxGeometry(2.75, 0.16, 0.26)),
   pole: null, pylon: null,
 };
@@ -30,7 +31,7 @@ G.pole = shared(merge([cylGeo(0.12, 0.15, 7.5, 6).translate(0, 3.75, 0), boxAt(1
 G.pylon = shared(merge([boxAt(0.5, 24, 0.5, 0, 12, 0, 3), boxAt(9, 0.35, 0.35, 0, 20, 0, 3), boxAt(6, 0.35, 0.35, 0, 23, 0, 3),
   boxAt(0.3, 9, 0.3, -1.2, 4.5, 0, 3, 0), boxAt(0.3, 9, 0.3, 1.2, 4.5, 0, 3, 0)]));
 const trunkMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
-const crownMat = new THREE.MeshLambertMaterial({ color: 0xffffff, flatShading: true });
+const crownMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
 const wireMat = new THREE.LineBasicMaterial({ color: 0x1e1e1e });
 const _m4 = new THREE.Matrix4(), _q = new THREE.Quaternion(), _v = new THREE.Vector3(), _s = new THREE.Vector3(), _col = new THREE.Color(), _up = new THREE.Vector3(0, 1, 0);
 const _fr = {};
@@ -175,6 +176,7 @@ export class World {
     this._layout(ctx);
     this._extras(ctx);
     this._trees(ctx);
+    g.traverse((o) => { if (o.isMesh && !o.isInstancedMesh) { o.receiveShadow = true; o.castShadow = !o.userData.flat; } });
     this.scene.add(g);
     this.chunks.set(ci, { g, loot: ctx.loot, obs: ctx.obs, solids: ctx.solids });
   }
@@ -219,16 +221,16 @@ export class World {
   _ground(ctx) {
     const se = ctx.season;
     const tex = se === 'winter' ? 'snow_02' : se === 'autumn' ? 'withered_grass' : 'sparse_grass';
-    let tint = se === 'winter' ? 0xf4f8ff : se === 'autumn' ? 0xd8c8a8 : 0xc8d8b0;
-    if (ctx.zone === 'swamp' && se !== 'winter') tint = 0x9aa888;
+    let tint = se === 'winter' ? 0xf4f8ff : 0xffffff;
+    if (ctx.zone === 'swamp' && se !== 'winter') tint = 0xa8b498;
     const geo = ribbon(ctx.s0, ctx.s1, 10, [[-280, 0], [-12, 0], [12, 0], [280, 0]], ctx.O, 7, 7, ctx.s0 % 700);
-    ctx.g.add(new THREE.Mesh(geo, M(tex, tint)));
+    const gm = new THREE.Mesh(geo, M(tex, tint)); gm.userData.flat = true; ctx.g.add(gm);
   }
   _trackAt(ctx, off, sA, sB) {
     if (sB <= sA) return;
     const win = ctx.season === 'winter';
     const bal = ribbon(sA, sB, 5, [[off - 3.4, 0.03], [off - 1.9, 0.4], [off + 1.9, 0.4], [off + 3.4, 0.03]], ctx.O, 2.5, 2.5, sA % 250);
-    ctx.g.add(new THREE.Mesh(bal, M('gravel_floor_02', win ? 0xdadfe4 : 0xa8a49c)));
+    const bm = new THREE.Mesh(bal, M('gravel_floor_02', win ? 0xdadfe4 : 0xa8a49c)); bm.userData.flat = true; ctx.g.add(bm);
     const n = Math.floor((sB - sA) / 0.55);
     const im = new THREE.InstancedMesh(G.sleeper, M('rough_wood', 0x6a5a4a), n);
     for (let i = 0; i < n; i++) {
@@ -236,7 +238,7 @@ export class World {
       _v.set(_fr.x + _fr.nx * off - ctx.O.x, 0.44, _fr.z + _fr.nz * off - ctx.O.z);
       _q.setFromAxisAngle(_up, _fr.yaw); _m4.compose(_v, _q, _s.set(1, 1, 1)); im.setMatrixAt(i, _m4);
     }
-    ctx.g.add(im);
+    im.receiveShadow = true; ctx.g.add(im);
     const rm = P(0x8d9298, 90);
     for (const c of [-0.795, 0.795]) {
       const rg = ribbon(sA, sB, 4, [[off + c - 0.036, 0.5], [off + c - 0.036, 0.64], [off + c + 0.036, 0.64], [off + c + 0.036, 0.5]], ctx.O);
@@ -303,11 +305,11 @@ export class World {
       if (st.s + 190 > ctx.s0 && st.s - 190 < ctx.s1) ctx.bands.push([Math.min(off - 3, off + 3), Math.max(off - 3, off + 3)]);
       for (const w of st.wagons) if (w.s >= ctx.s0 && w.s < ctx.s1) {
         const wr = rngOf(this.seed, 505, st.k, w.s | 0);
-        const m = w.tank ? makeTank(wr) : makeBoxcar(wr);
+        const m = w.tank ? makeTank(wr) : makeWreck(wr);
         this.place(ctx, m.g, w.s, off, 0, 0.64);
         if (wr() < 0.15 && !w.tank) m.g.rotation.z = 0.05;
         const fp = worldPos(w.s, off + sgn * 2.2);
-        const L = { id: w.id, type: w.tank ? 'wagon_tank' : 'wagon_box', label: w.tank ? 'Брошенная цистерна' : 'Брошенный крытый вагон', s: w.s, d: off, x: fp.x, z: fp.z };
+        const L = { id: w.id, type: w.tank ? 'wagon_tank' : 'wagon_box', label: w.tank ? 'Брошенная цистерна' : m.label, s: w.s, d: off, x: fp.x, z: fp.z };
         ctx.loot.push(L); this.loot.set(L.id, L);
       }
     }
@@ -503,8 +505,8 @@ export class World {
     let label;
     if (type === 'tree') {
       label = 'Упавшее дерево';
-      const t = new THREE.Mesh(cylGeo(0.35, 0.45, 16, 7).rotateZ(HALF_PI), M('rough_wood', 0x7a6048)); t.position.y = 1.0; g.add(t);
-      const c = new THREE.Mesh(G.ico, crownMat); c.scale.set(3, 2.4, 3); c.position.set(8, 2, 0); g.add(c);
+      const t = new THREE.Mesh(packGeo(ctx.season === 'winter' ? 'PineTree_Snow_2' : 'PineTree_2'), PACK_MAT);
+      t.scale.setScalar(3.6); t.rotation.set(0.3, 0, -HALF_PI); t.position.set(-6.5, 0.9, 0); t.castShadow = true; g.add(t);
       g.rotation.z = 0;
     } else if (type === 'car') {
       label = 'Машина на путях';
@@ -523,13 +525,21 @@ export class World {
     ctx.obs.push(o); this.obstacles.set(id, o);
   }
 
-  // ---------- деревья (инстансы — 3 вызова отрисовки на участок)
+  // ---------- деревья и растительность: рядом с путём — готовые модели (Quaternius Nature, CC0), вдали — упрощённые
   _trees(ctx) {
-    const r = ctx.r, z = ctx.zone, se = ctx.season, reg = ctx.region;
-    const counts = { forest: 330, field: 30, village: 55, dacha: 45, town: 28, industrial: 14, swamp: 70, settlement: 12 };
+    const r = ctx.r, z = ctx.zone, se = ctx.season, reg = ctx.region, win = se === 'winter', aut = se === 'autumn';
+    const counts = { forest: 300, field: 30, village: 55, dacha: 45, town: 28, industrial: 14, swamp: 70, settlement: 12 };
     let n = counts[z] || 30;
-    const birchShare = z === 'swamp' ? 0.6 : 0.25 + reg.birch * 0.6;
-    const trunks = [], icos = [], cones = [];
+    const birchShare = z === 'swamp' ? 0.5 : 0.2 + reg.birch * 0.5;
+    const trunks = [], icos = [], cones = [], inst = new Map();
+    const v2 = (k) => RI(r, 1, k);               // на участок — свои варианты моделей
+    const V = { birch: [v2(3), v2(3)], common: [v2(3), v2(3)], pine: [v2(3), v2(3)], willow: [v2(2)] };
+    const put = (name, p, sc, rot = r() * 6.28, tint) => {
+      const key = tint ? name + '|' + tint : name;
+      if (!inst.has(key)) inst.set(key, { name, tint, list: [] });
+      inst.get(key).list.push([p.x, p.y || 0, p.z, sc, rot]);
+    };
+    const NEAR = 65;
     let belt = z === 'field' && r() < 0.6 ? (r() < 0.5 ? 1 : -1) * R(r, 25, 90) : null;
     if (belt) n += 60;
     for (let i = 0, tries = 0; i < n && tries < n * 3; tries++) {
@@ -539,23 +549,50 @@ export class World {
       if (ctx.occ.some((o) => s > o[0] && s < o[1] && d > o[2] && d < o[3])) continue;
       i++;
       const p = worldPos(s, d).sub(ctx.O);
-      const kind = z === 'swamp' && r() < 0.35 ? 'dead' : r() < birchShare ? 'birch' : reg.conif < 0.5 ? 'pine' : 'spruce';
-      const sc = R(r, 0.75, 1.3);
-      if (kind === 'birch') {
-        const h = 8 * sc;
-        trunks.push([p, 0.22 * sc, h, 0xe8e4d8]);
-        if (se !== 'winter') icos.push([p, h * 0.68, 2.1 * sc, 3.4 * sc, se === 'autumn' ? (r() < 0.6 ? 0xd9a93a : 0xc8742e) : (r() < 0.5 ? 0x7fa04a : 0x6a9440)]);
-      } else if (kind === 'pine') {
-        const h = 12 * sc;
-        trunks.push([p, 0.25 * sc, h, 0x7a5236]);
-        cones.push([p, h * 0.55, 2.3 * sc, h * 0.55, se === 'winter' ? 0x9fb0a8 : 0x2f5a35]);
-      } else if (kind === 'spruce') {
-        const h = 11 * sc;
-        trunks.push([p, 0.22 * sc, 2.2, 0x4a3a2a]);
-        cones.push([p, 1.2, 2.8 * sc, h, se === 'winter' ? 0xb8c8c4 : 0x24442a]);
-      } else {
-        trunks.push([p, 0.18 * sc, 6 * sc, 0x6a645a]);
+      const kind = z === 'swamp' && r() < 0.35 ? 'dead' : z === 'swamp' && r() < 0.3 ? 'willow' : r() < birchShare ? 'birch' : r() < 0.3 ? 'common' : 'pine';
+      const sc = R(r, 0.8, 1.25);
+      if (Math.abs(d) < NEAR) {
+        const vi = pick(r, V[kind] || [1]);
+        if (kind === 'birch') put(win ? 'BirchTree_Dead_' + (vi > 2 ? 2 : vi) : aut ? 'BirchTree_Autumn_' + vi : 'BirchTree_' + vi, p, sc * 3.0);
+        else if (kind === 'common') put(win ? 'CommonTree_Dead_' + (vi > 2 ? 2 : vi) : aut ? 'CommonTree_Autumn_' + vi : 'CommonTree_' + vi, p, sc * 3.0);
+        else if (kind === 'pine') put(win ? 'PineTree_Snow_' + vi : 'PineTree_' + vi, p, sc * 3.6);
+        else if (kind === 'willow') put(win ? 'Willow_Dead_1' : aut ? 'Willow_Autumn_1' : 'Willow_' + vi, p, sc * 2.8);
+        else put(pick(r, ['Willow_Dead_1', 'BirchTree_Dead_1', 'BirchTree_Dead_2', 'CommonTree_Dead_1']), p, sc * 2.8);
+        continue;
       }
+      // дальний план — простые формы
+      if (kind === 'birch' || kind === 'common' || kind === 'willow') {
+        const h = 8 * sc;
+        trunks.push([p, 0.22 * sc, h, kind === 'birch' ? 0xe8e4d8 : 0x6a5040]);
+        if (!win) icos.push([p, h * 0.68, 2.3 * sc, 3.4 * sc, aut ? (r() < 0.6 ? 0xe0a030 : 0xd07028) : kind === 'birch' ? 0x5f9a3a : 0x4f8a34]);
+      } else if (kind === 'pine') {
+        const h = 11 * sc;
+        trunks.push([p, 0.25 * sc, 2.2, 0x6a4a32]);
+        cones.push([p, 1.4, 2.8 * sc, h, win ? 0xc8d4d0 : 0x2f6a35]);
+      } else trunks.push([p, 0.18 * sc, 6 * sc, 0x6a645a]);
+    }
+    // подлесок у пути: кусты, камни, трава, пни, брёвна, цветы
+    const near = { forest: 70, field: 60, village: 40, dacha: 35, town: 14, industrial: 10, swamp: 55, settlement: 6 }[z] || 20;
+    for (let i = 0, tries = 0; i < near && tries < near * 3; tries++) {
+      const s = R(r, ctx.s0, ctx.s1), d = (r() < 0.5 ? -1 : 1) * R(r, 4.5, 45);
+      if (Math.abs(d) < 8 && r() < 0.6) continue;
+      if (ctx.bands.some((b) => d > b[0] && d < b[1]) && Math.abs(d) > 4) continue;
+      if (ctx.occ.some((o) => s > o[0] && s < o[1] && d > o[2] && d < o[3])) continue;
+      i++;
+      const p = worldPos(s, d).sub(ctx.O), k = r();
+      if (k < 0.32) put(win ? 'Bush_Snow_' + RI(r, 1, 2) : z !== 'town' && r() < 0.25 && !aut ? 'BushBerries_1' : 'Bush_' + RI(r, 1, 2), p, R(r, 1.6, 2.6), undefined, aut ? 0xe6b070 : undefined);
+      else if (k < 0.5) put(win ? 'Rock_Snow_' + RI(r, 1, 2) : r() < 0.5 ? 'Rock_Moss_' + RI(r, 1, 3) : 'Rock_' + RI(r, 1, 2), p, R(r, 1.2, 3));
+      else if (k < 0.85) { if (!win) put(z === 'field' && r() < 0.5 ? 'Wheat' : r() < 0.25 && !aut ? 'Flowers' : 'Grass' + (r() < 0.5 ? '' : '_2'), p, R(r, 1.2, 1.8), undefined, aut ? 0xd8b060 : undefined); }
+      else if (z === 'forest' || z === 'swamp') put(win ? 'TreeStump_Snow' : r() < 0.5 ? 'TreeStump' : r() < 0.5 ? 'WoodLog_Moss' : 'WoodLog', p, R(r, 1.6, 2.4));
+    }
+    const _rq = new THREE.Quaternion();
+    for (const { name, tint, list } of inst.values()) {
+      const geo = packGeo(name, tint ? { tint } : {});
+      const im = new THREE.InstancedMesh(geo, PACK_MAT, list.length);
+      list.forEach(([x, y, zz, sc, rot], i) => { _rq.setFromAxisAngle(_up, rot); _m4.compose(_v.set(x, y, zz), _rq, _s.set(sc, sc, sc)); im.setMatrixAt(i, _m4); });
+      im.castShadow = geo.boundingBox.max.y > 1.5; im.receiveShadow = true;
+      im.computeBoundingSphere();
+      ctx.g.add(im);
     }
     if (trunks.length) {
       const im = new THREE.InstancedMesh(G.trunk, trunkMat, trunks.length);

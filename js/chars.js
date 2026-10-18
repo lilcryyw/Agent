@@ -91,10 +91,10 @@ function makeVariants() {
       VARIANTS[base + ':' + kind] = mats.map((m, mi) => {
         const img = imgOf(m);
         const map = img ? rotTexture(img, 77 + vi * 31 + mi * 7 + (base === 'woman' ? 500 : 0), kind.replace('2', '')) : null;
-        return new THREE.MeshLambertMaterial({ map, color: map ? 0xffffff : 0x2a2a28 });
+        return new THREE.MeshStandardMaterial({ map, color: map ? 0xffffff : 0x2a2a28, roughness: 0.85 });
       });
     });
-    VARIANTS[base + ':clean'] = mats.map((m) => new THREE.MeshLambertMaterial({ map: m.map || null, color: m.map ? 0xffffff : 0x202326 }));
+    VARIANTS[base + ":clean"] = mats.map((m) => new THREE.MeshStandardMaterial({ map: m.map || null, color: m.map ? 0xffffff : 0x202326, roughness: 0.8 }));
   }
 }
 
@@ -111,7 +111,7 @@ export class Char {
       if (o.isMesh) {
         const k = B.mats.indexOf(o.userData._srcMat || o.material);
         o.material = mats[k >= 0 ? k : 0] || mats[0];
-        o.frustumCulled = false;
+        o.frustumCulled = false; o.castShadow = true;
       }
     });
     this.inner = new THREE.Group();

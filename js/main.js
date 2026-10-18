@@ -1,5 +1,5 @@
 import * as THREE from '../vendor/three.module.min.js';
-import { T, rngOf, R, RI, pick, wpick, clamp, lerp, worldPos, toTrack, frameAt } from './util.js';
+import { T, rngOf, R, RI, pick, wpick, clamp, lerp, worldPos, toTrack, frameAt, trackDX } from './util.js';
 import { World, ZONE_DENSITY, ZONE_NAMES } from './world.js';
 import { Train, BRAKE_NAMES, BRAKE_HINT } from './train.js';
 import { Zombies } from './zombies.js';
@@ -8,6 +8,7 @@ import { Player } from './player.js';
 import { Audio } from './audio.js';
 import { ITEMS, CAT_NAMES, WEAPONS, AMMO, LOOT, WAGON_CARGO, LOOT_TIME, UPGRADES, makeUnique, ICONS, itemDesc } from './data.js';
 import { iconImg } from './icons.js';
+import { loadPacks } from './packs.js';
 
 const $ = (s) => document.querySelector(s);
 const SAVE = 'mp_save_v2', SAFE = 'mp_safe_v2', OPTS = 'mp_opts_v1';
@@ -21,14 +22,20 @@ const opts = Object.assign({ sound: true, vig: true, hq: false }, store.get(OPTS
 
 // ---------------- рендер и сцена
 const canvas = $('#c');
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: opts.hq, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(devicePixelRatio, opts.hq ? 2 : 1.3));
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio, opts.hq ? 2 : 1.5));
+renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure = 1.05;
+renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(62, 1, 0.1, 900);
 scene.fog = new THREE.Fog(0x9ab0c4, 40, 420);
 scene.background = new THREE.Color(0x9ab0c4);
-const hemi = new THREE.HemisphereLight(0xdfe8f0, 0x5a5a48, 1.1); scene.add(hemi);
-const sun = new THREE.DirectionalLight(0xfff2dc, 1.5); scene.add(sun); scene.add(sun.target);
+const hemi = new THREE.HemisphereLight(0xdfe8f0, 0x5a5a48, 0.6); scene.add(hemi);
+const sun = new THREE.DirectionalLight(0xfff2dc, 2.2); scene.add(sun); scene.add(sun.target);
+sun.castShadow = true; sun.shadow.mapSize.set(opts.hq ? 2048 : 1024, opts.hq ? 2048 : 1024);
+Object.assign(sun.shadow.camera, { left: -38, right: 38, top: 38, bottom: -38, near: 1, far: 260 });
+sun.shadow.bias = -0.0004; sun.shadow.normalBias = 0.04;
+let skyTex = null; const horizon = new THREE.Color(0xb8c8d8);
 const head = new THREE.SpotLight(0xfff4d8, 0, 0, 0.32, 0.5, 0);
 const headT = new THREE.Object3D();
 const search = new THREE.SpotLight(0xffffff, 0, 0, 0.12, 0.3, 0);
@@ -121,7 +128,7 @@ function buildTrain(o) {
   train.build();
   const L = train.loco;
   head.position.copy(L.lampPos); L.g.add(head); headT.position.set(0, 0, -80); L.g.add(headT); head.target = headT;
-  search.position.set(0.9, 5.15, -8.2); L.g.add(search); searchT.position.set(0, -2, -200); L.g.add(searchT); search.target = searchT;
+  search.position.copy(L.up.light.position); L.g.add(search); searchT.position.set(0, -2, -200); L.g.add(searchT); search.target = searchT;
   computeAxles();
 }
 function newGame() {
@@ -209,7 +216,7 @@ const zctx = {
   hurtTrain(d) { if (!running) return; train.dur -= d; if (d > 1.5) { audio.thud(); if (player.mode !== 'ground') hurtFlash(0.4); } if (train.dur <= 0) gameOver('Поезд разбит. Зомби взяли его штурмом.'); },
   hurtPlayer(d, outside) {
     if (!running) return;
-    S.hp -= d * (outside ? 1 : 0.6); hurtFlash(1); audio.thud();
+    S.hp -= d * (outside ? 1 : 0.6); hurtFlash(1); audio.play('punch', { vol: 0.9 }); if (Math.random() < 0.5) audio.play('breath', { vol: 0.6, delay: 0.2 });
     if (task) { task = null; $('#prog').hidden = true; notify('Обыск прерван!', 'alert'); }
     if (outside && !S.infected && Math.random() < 0.1) { S.infected = true; notify('Укус! Нужны антибиотики.', 'alert'); }
     if (S.hp <= 0) gameOver(outside ? 'Вас загрызли.' : 'Зомби ворвались в кабину.');
@@ -222,8 +229,8 @@ const zctx = {
     else if (kind === 'splat') audio.splat(pos);
     else if (kind === 'notice') audio.play('z_growl', { pos, vol: 1.1, vary: 0.15 });
     else if (kind === 'attack') audio.play('z_attack', { pos, vol: 1.2, vary: 0.1 });
-    else if (kind === 'bang') audio.play('hit_metal', { pos, vol: 0.6, vary: 0.25 });
-    else if (kind === 'step') audio.play(groundSurface(pos), { pos, vol: 0.45, rate: 0.78, vary: 0.1, ref: 2 });
+    else if (kind === 'bang') audio.play(Math.random() < 0.5 ? 'clank' : 'hit_metal', { pos, vol: 0.8, vary: 0.25 });
+    else if (kind === 'step') audio.play(Math.random() < 0.15 ? 'z_drag' : 'z_step', { pos, vol: 0.7, vary: 0.15, ref: 2.5 });
   },
   scream(z) {
     audio.scream(z.h.root.position); zombies.alarm(z.h.root.position.x, z.h.root.position.z, 90); notify('Крикун созывает мертвецов!', 'alert');
@@ -311,7 +318,7 @@ let AXLES = [];
 function computeAxles() {
   AXLES = []; let off = 0;
   for (const c of train.cars) {
-    const bog = c.kind === 'loco' ? [-5.4, 5.4] : c.kind === 'tank' ? [-3.9, 3.9] : [-4.4, 4.4], n = c.kind === 'loco' ? 3 : 2;
+    const e = c.kind === 'loco' ? c.len / 2 - 3.2 : c.len / 2 - 2.4, bog = [-e, e], n = c.kind === 'loco' ? 3 : 2;
     for (const b of bog) for (let i = 0; i < n; i++) AXLES.push(off + c.len / 2 + b + (i - (n - 1) / 2) * 1.85);
     off += c.len + 0.6;
   }
@@ -414,12 +421,9 @@ function trainSpots() {
   const out = []; let o = 0;
   for (const c of train.cars) {
     const center = -o - c.len / 2;
-    if (c.kind === 'loco') {
-      for (const f of [1, -1]) out.push({ kind: 'door', off: center + 6.45, d: f * 2.05, f });
-      for (const f of [1, -1]) out.push({ kind: 'ladder', off: center - 8.57, d: f * 2.0, f, top: center - 7.6 });
-    } else if (c.kind === 'box') {
-      for (const f of [1, -1]) out.push({ kind: 'ladder', off: center - 6.75, d: f * 2.0, f, top: center - 5.8 });
-    }
+    const sp = c.spots || {};
+    if (sp.door != null) for (const f of [1, -1]) out.push({ kind: 'door', off: center - sp.door, d: f * 2.05, f });
+    if (sp.ladder != null) for (const f of [1, -1]) out.push({ kind: 'ladder', off: center - sp.ladder, d: f * 2.0, f, top: center - sp.top });
     o += c.len + 0.6;
   }
   return out;
@@ -430,14 +434,14 @@ function enterCab(instant) {
   const doors = trainSpots().filter((s) => s.kind === 'door');
   const dd = doors.map((s) => [spotPos(s).distanceTo(player.pos), s]).sort((a, b) => a[0] - b[0])[0][1];
   player.climb([{ p: player.pos.clone() }, { rel: true, off: dd.off, d: dd.d, y: 0.4 }, { rel: true, off: dd.off, d: dd.f * 1.5, y: 2.1 }], 'cab', 1.2);
-  audio.play('door_open', { vol: 0.8, delay: 0.5 }); audio.play('door_close', { vol: 0.8, delay: 1.25 });
+  audio.play('door_handle', { vol: 0.8, delay: 0.5 }); audio.play('door_slam', { vol: 0.8, delay: 1.2 });
 }
 function exitCab() {
   if (Math.abs(train.v) > 0.4) return notify('Сначала остановите поезд.', 'me');
   const side = orbitSide();
   const door = trainSpots().find((s) => s.kind === 'door' && s.f === side);
   train.pos = 0; if (train.brake < 3) train.brake = 3;
-  audio.play('door_open', { vol: 0.8 }); audio.play('door_close', { vol: 0.7, delay: 0.9 });
+  audio.play('door_handle', { vol: 0.8 }); audio.play('door_slam', { vol: 0.7, delay: 0.9 });
   player.pos.copy(worldPos(train.s + door.off, door.f * 1.5)); player.pos.y = 2.1;
   player.root.visible = true;
   player.climb([{ p: player.pos.clone() }, { rel: true, off: door.off, d: door.d, y: 0.4 }, { rel: true, off: door.off, d: door.f * 3.2, y: 0.4 }], 'ground', 1.1);
@@ -465,7 +469,7 @@ function taskTick(dt) {
   if (!task) return;
   if (player.pos.distanceTo(task.at) > 0.8) { task = null; $('#prog').hidden = true; notify('Обыск брошен.', 'me'); return; }
   task.t += dt;
-  task.snd = (task.snd || 0) - dt; if (task.snd <= 0) { task.snd = 0.9 + Math.random() * 0.6; audio.play(task.kind === 'loot' ? 'cloth' : 'smash_wood', { vol: 0.7, vary: 0.2 }); }
+  task.snd = (task.snd || 0) - dt; if (task.snd <= 0) { task.snd = 0.9 + Math.random() * 0.6; if (task.kind !== 'loot') audio.play(Math.random() < 0.5 ? 'smash_wood' : 'smash_metal', { vol: 0.7, vary: 0.2 }); }
   $('#prog .pb u').style.width = (100 * Math.min(1, task.t / task.total)).toFixed(0) + '%';
   if (task.t < task.total) return;
   const T0 = task; task = null; $('#prog').hidden = true;
@@ -526,7 +530,7 @@ function autoTarget() {
   return best;
 }
 function shotOrigin(v) {
-  if (player.mode === 'cab') return train.loco.g.localToWorld(v.set(1.2, 3.8, -7.8));
+  if (player.mode === 'cab') return train.loco.g.localToWorld(v.copy(train.loco.gunPos));
   return v.copy(player.pos).add(new THREE.Vector3(0, 1.45, 0));
 }
 function fire(z) {
@@ -548,7 +552,7 @@ function fire(z) {
   let dmg = 0, hits = 0;
   for (let i = 0; i < W.pellets; i++) if (r() < hitP) { hits++; dmg += W.dmg * (W.pellets > 1 ? clamp(1 - d3 / W.range * 0.7, 0.2, 1) : 1); }
   const headShot = hits > 0 && r() < 0.18;
-  if (hits) { const dead = zombies.hit(z, dmg, headShot); audio.play('flesh', { pos: z.h.root.position, vol: 0.9, vary: 0.2 }); if (dead) { zctx.onKill(z); audio.play(Math.random() < 0.5 ? 'z_death' : 'body_fall', { pos: z.h.root.position, vol: 0.8, delay: 0.15 }); } bleed(_p); tracer(_o, _p); if (headShot) hitMark(); }
+  if (hits) { const dead = zombies.hit(z, dmg, headShot); audio.play('flesh', { pos: z.h.root.position, vol: 0.9, vary: 0.2 }); audio.play('impact', { pos: z.h.root.position, vol: 0.5 }); if (dead) { zctx.onKill(z); audio.play(Math.random() < 0.5 ? 'z_death' : 'body_fall', { pos: z.h.root.position, vol: 0.8, delay: 0.15 }); } bleed(_p); tracer(_o, _p); if (headShot) hitMark(); }
   else tracer(_o, _p.clone().add(new THREE.Vector3(R(r, -1.5, 1.5), R(r, -0.5, 1.2), R(r, -1.5, 1.5))));
 }
 function tracer(a, b) {
@@ -596,7 +600,7 @@ function updateCamera(dt) {
     camera.position.copy(camPos);
     camera.lookAt(p.x - Math.sin(a) * 6 + Math.cos(a) * 0.7, p.y + 1.5, p.z - Math.cos(a) * 6 - Math.sin(a) * 0.7);
   } else if (camMode === 'cab' && running) {
-    L.localToWorld(camPos.set(0.55, 3.9, -9.05));
+    L.localToWorld(camPos.copy(train.loco.cabCam));
     camera.position.copy(camPos);
     const a = yaw + look.yaw, pt = look.pitch;
     camera.lookAt(camPos.x - Math.sin(a) * Math.cos(pt) * 50, camPos.y + Math.sin(pt) * 50, camPos.z - Math.cos(a) * Math.cos(pt) * 50);
@@ -617,11 +621,20 @@ function updateCamera(dt) {
   const w = S.weather.type, over = w === 'clear' ? 0 : w === 'cloudy' ? 0.5 : 0.8;
   const sky = _c1.setRGB(0.05, 0.07, 0.12).lerp(_c2.setRGB(0.55 - over * 0.12, 0.67 - over * 0.1, 0.78 - over * 0.12), dayK).lerp(_c3.setRGB(0.85, 0.55, 0.38), dusk * 0.45 * (1 - over * 0.6));
   if (env().season === 'winter') sky.lerp(_c2.setRGB(0.75, 0.8, 0.86), 0.25 * dayK);
-  scene.background.copy(sky); scene.fog.color.copy(sky);
+  const texSky = skyTex && (w === 'clear' || w === 'cloudy');
+  if (texSky) {
+    const bi = (0.04 + 0.96 * dayK) * (w === 'cloudy' ? 0.85 : 1);
+    scene.background = skyTex; scene.backgroundIntensity = bi;
+    scene.fog.color.copy(horizon).multiplyScalar(bi).lerp(_c3.setRGB(0.85, 0.55, 0.38), dusk * 0.3);
+  } else { scene.background = _bg.copy(sky); scene.fog.color.copy(sky); }
+  scene.environmentIntensity = 0.12 + 0.75 * dayK * (1 - over * 0.4);
   const fogK = { clear: 1, cloudy: 0.85, rain: 0.55, fog: 0.22, snow: 0.45 }[w];
   scene.fog.far = lerp(170, 430, dayK) * fogK + 20; scene.fog.near = 8 + 30 * fogK * dayK;
-  hemi.intensity = 0.22 + 0.95 * dayK; sun.intensity = 1.5 * dayK * (1 - over * 0.6);
-  sun.position.set(camera.position.x + Math.cos(t / 24 * 6.28) * 100, 80, camera.position.z - 60); sun.target.position.copy(camera.position);
+  hemi.intensity = 0.28 + 0.45 * dayK; sun.intensity = 2.6 * dayK * (1 - over * 0.65);
+  sun.castShadow = dayK > 0.15 && over < 0.7;
+  const fx0 = foot ? player.pos.x : camPos.x, fz0 = foot ? player.pos.z : camPos.z;
+  sun.target.position.set(fx0, 0, fz0);
+  sun.position.set(fx0 + Math.cos(t / 24 * 6.28) * 90, 110, fz0 - 50);
   const night = 1 - dayK;
   head.intensity = train.engine ? 0.6 + night * 3.2 : 0;
   search.intensity = train.up.light && train.engine ? night * 4 : 0;
@@ -631,7 +644,7 @@ function updateCamera(dt) {
   rain.visible = w === 'rain'; snow.visible = w === 'snow';
   if (rain.visible || snow.visible) precip(dt, rain.visible ? rain : snow, rain.visible ? 22 : 2.2);
 }
-const _c1 = new THREE.Color(), _c2 = new THREE.Color(), _c3 = new THREE.Color();
+const _c1 = new THREE.Color(), _c2 = new THREE.Color(), _c3 = new THREE.Color(), _bg = new THREE.Color();
 function precip(dt, obj, sp) {
   obj.position.set(camera.position.x, camera.position.y - 12, camera.position.z);
   const p = obj.geometry.attributes.position, stride = obj === rain ? 2 : 1;
@@ -711,9 +724,9 @@ function setPos(p) {
   if (p === train.pos) return;
   if (p > 0 && !train.engine) { notify('Сначала запустите дизель.', 'me'); return; }
   if (p > 0 && train.rev === 0) { notify('Реверсор в нуле — выберите «В».', 'me'); return; }
-  train.pos = p; audio.click();
+  train.pos = p; audio.notch();
 }
-function setBrake(b) { b = clamp(Math.round(b), 0, 5); if (b !== train.brake) { const was = train.brake; train.brake = b; audio.click(); if (b >= 4 && was < 4) audio.play('hiss', { vol: b === 5 ? 1 : 0.6 }); else if (b <= 1 && was >= 2 && train.TC > 0.3) audio.play('hiss', { vol: 0.4, rate: 1.3 }); } }
+function setBrake(b) { b = clamp(Math.round(b), 0, 5); if (b !== train.brake) { const was = train.brake; train.brake = b; audio.notch(); if (b === 5 && was < 5) audio.play('air_emerg', { vol: 1, must: true }); else if (b === 4 && was < 4) audio.play('brake_apply', { vol: 0.8 }); else if (b <= 1 && was >= 2 && train.TC > 0.3) audio.play('air_release', { vol: 0.7 }); } }
 function lever(el, n, set, invert) {
   const calc = (e) => { const r = el.querySelector('.rail').getBoundingClientRect(); const k = clamp((e.clientY - r.top) / r.height, 0, 1); return invert ? (1 - k) * (n - 1) : k * (n - 1); };
   el.addEventListener('pointerdown', (e) => { el.setPointerCapture(e.pointerId); el._d = true; set(calc(e)); e.preventDefault(); });
@@ -741,7 +754,7 @@ function bindUi() {
   });
   for (const id of ['#bWeapon', '#bWeapon2']) $(id).addEventListener('click', () => {
     const own = ownedWeapons(); if (!own.length) { notify('Нет оружия.', 'me'); return; }
-    S.weapon = own[(own.indexOf(S.weapon) + 1) % own.length]; audio.click();
+    S.weapon = own[(own.indexOf(S.weapon) + 1) % own.length]; audio.play('g_cock', { vol: 0.8 });
   });
   document.querySelectorAll('#rev button').forEach((b) => b.addEventListener('click', () => {
     const v = +b.dataset.rev;
@@ -810,9 +823,9 @@ function act(a, ds) {
   }
 }
 function applyOpts() {
-  audio.on = opts.sound; if (audio.master) audio.master.gain.value = opts.sound ? 0.9 : 0;
+  audio.setOn(opts.sound);
   if (train) train.vigOn = opts.vig;
-  renderer.setPixelRatio(Math.min(devicePixelRatio, opts.hq ? 2 : 1.3)); resize();
+  renderer.setPixelRatio(Math.min(devicePixelRatio, opts.hq ? 2 : 1.5)); resize();
 }
 
 // ---------------- окна
@@ -1115,6 +1128,7 @@ function updateHud() {
   const bar = (sel, v, low) => { const el = $(sel); el.querySelector('u').style.width = clamp(v, 0, 100) + '%'; el.classList.toggle('low', v < low); };
   bar('#sHp', S.hp, 30); bar('#sFood', S.food, 20); bar('#sWater', S.water, 20); bar('#sFuel', train.fuel / train.fuelMax * 100, 15); bar('#sDur', train.dur / train.durMax * 100, 30);
   $('#sHp em').textContent = Math.ceil(S.hp); $('#sFood em').textContent = Math.round(S.food); $('#sWater em').textContent = Math.round(S.water);
+  if (player.stam < 15 && !player.breathT) { player.breathT = 1; audio.play('breath', { vol: 0.7 }); } if (player.stam > 50) player.breathT = 0;
   $('#stam u').style.width = player.stam + '%'; $('#stam').classList.toggle('low', player.stam < 25);
   $('#bRun').classList.toggle('on', player.run); $('#bCrouch').classList.toggle('on', player.crouch);
   player.setWeapon(S.weapon);
@@ -1192,17 +1206,36 @@ function contextActions() {
 }
 const dc = $('#dc'), dx = dc.getContext('2d');
 function sizeDash() { const r = dc.getBoundingClientRect(); dc.width = Math.max(1, r.width * devicePixelRatio); dc.height = Math.max(1, r.height * devicePixelRatio); }
-function drawDash() {
-  audio.engine(train.rpm, train.pos / 15, train.engine);
-  if (audio.ctx) {
-    const dropping = train.brake >= 4 && train.TM > 0.2;
-    audio.set(audio.hissN, dropping ? (train.brake === 5 ? 0.18 : 0.06) : train.brake === 0 && train.TM < 5.5 ? 0.05 : 0);
-    audio.rolling(train.v);
-    audio.ambience({ clear: 0.3, cloudy: 0.6, rain: 1, fog: 0.4, snow: 1.2 }[S.weather.type] || 0.5, player.mode === 'cab' ? train.v : 0);
-    zctx.trainNoise = train.engine ? 50 + Math.abs(train.v) * 4 : 12;
-    if (Math.random() < 0.0008 && S.time > 6 && S.time < 20) audio.play('crows', { vol: 0.35 });
-    audio.set(audio.slipS, train.slip ? 0.15 : 0);
+let prevV = 0, prevTM = 5, prevBrake = 2, ambT = 5, stopT = 0;
+const _cp = new THREE.Vector3();
+function trainSound() {
+  if (!audio.ready || !S) return;
+  const dt = 1 / 60, v = train.v;
+  const dTM = (train.TM - prevTM) / dt; prevTM = train.TM;
+  const curve = Math.abs(trackDX(train.s + 5) - trackDX(train.s - 5)) / 10;
+  const view = player.mode !== 'cab' ? 'foot' : camMode === 'cab' ? 'cab' : 'chase';
+  const dist = view === 'foot' ? player.pos.distanceTo(train.loco.g.position) : 0;
+  audio.train({ v, rpm: train.rpm, load: train.pos / 15, on: train.engine, starting: train.starting > 0 ? 1 - train.starting / 3.2 : 0, TC: train.TC, dTM, brake: train.brake, curve, view, dist });
+  // трогание и остановка: лязг автосцепок, сброс воздуха
+  if (Math.abs(prevV) < 0.05 && Math.abs(v) >= 0.05) audio.couplers(train.cars.length, 0.6);
+  if (Math.abs(prevV) > 0.4 && Math.abs(v) < 0.05) { audio.couplers(train.cars.length, 0.8); stopT = 1.4; }
+  if (stopT > 0) { stopT -= dt; if (stopT <= 0) audio.play('stop_hiss', { vol: 0.9 }); }
+  prevV = v;
+  const w = S.weather.type, season = env().season;
+  const outside = player.mode !== 'cab' || camMode !== 'cab';
+  const day = S.time > 6 && S.time < 20, zone = world.zoneAt(train.s);
+  audio.ambience({ windK: { clear: 0.3, cloudy: 0.6, rain: 1, fog: 0.4, snow: 1.2 }[w] || 0.5, speed: player.mode === 'cab' ? Math.abs(v) : 0, winter: season === 'winter',
+    rain: w === 'rain', outside, birds: day && season !== 'winter' && w !== 'rain' && Math.abs(v) < 8 && zone !== 'industrial', searching: !!task });
+  ambT -= dt;
+  if (ambT <= 0) {
+    ambT = 40 + Math.random() * 80;
+    if (w === 'rain' && Math.random() < 0.6) audio.play('thunder', { vol: 0.7 + Math.random() * 0.3, delay: Math.random() * 2 });
+    else if (!day && Math.random() < 0.5) audio.play('owl', { vol: 0.35 });
   }
+  zctx.trainNoise = train.engine ? 50 + Math.abs(v) * 4 : 12;
+}
+function drawDash() {
+  trainSound();
   if ($('#cabHud').hidden) return;
   if (dc.width < 10) sizeDash();
   const W = dc.width, H = dc.height; if (W < 10) return;
@@ -1225,24 +1258,34 @@ function loadTextures(prog) {
     const maxAniso = renderer.capabilities.getMaxAnisotropy();
     for (const name of TEX) {
       const t = loader.load(`assets/tex/${name}.jpg`, () => { n++; prog(n / TEX.length); if (n === TEX.length) res(); }, undefined, () => { n++; if (n === TEX.length) res(); });
-      t.wrapS = t.wrapT = THREE.RepeatWrapping; t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = Math.min(4, maxAniso);
+      t.wrapS = t.wrapT = THREE.RepeatWrapping; t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = Math.min(8, maxAniso);
       T[name] = t;
+      const nt = loader.load(`assets/tex/${name}_n.jpg`); nt.wrapS = nt.wrapT = THREE.RepeatWrapping; nt.anisotropy = Math.min(4, maxAniso);
+      T[name + '_n'] = nt;
     }
+    loader.load('assets/tex/sky.jpg', (t) => {
+      t.mapping = THREE.EquirectangularReflectionMapping; t.colorSpace = THREE.SRGBColorSpace; skyTex = t;
+      const pm = new THREE.PMREMGenerator(renderer); scene.environment = pm.fromEquirectangular(t).texture; pm.dispose();
+      // цвет у горизонта — для тумана
+      const c = document.createElement('canvas'); c.width = 64; c.height = 32; const x = c.getContext('2d'); x.drawImage(t.image, 0, 0, 64, 32);
+      const d = x.getImageData(0, 14, 64, 2).data; let r = 0, g = 0, b = 0; for (let i = 0; i < d.length; i += 4) { r += d[i]; g += d[i + 1]; b += d[i + 2]; }
+      const n = d.length / 4; horizon.setRGB(r / n / 255, g / n / 255, b / n / 255, THREE.SRGBColorSpace);
+    });
   });
 }
 function showTitle() { $('#title').hidden = false; $('#bCont').hidden = !store.get(SAVE); }
 async function boot() {
   resize(); bindUi(); showTitle(); audio.preload();
   requestAnimationFrame(frame);
-  let a = 0, b = 0; const pr = () => ($('#loadbar u').style.width = ((a * 0.4 + b * 0.6) * 100) + '%');
-  await Promise.all([loadTextures((k) => { a = k; pr(); }), loadChars((k) => { b = k; pr(); })]);
+  let a = 0, b = 0, c = 0; const pr = () => ($('#loadbar u').style.width = ((a * 0.3 + b * 0.4 + c * 0.3) * 100) + '%');
+  await Promise.all([loadTextures((k) => { a = k; pr(); }), loadChars((k) => { b = k; pr(); }), loadPacks(['train_pack', 'nature_pack'], (k) => { c = k; pr(); })]);
   player = new Player(scene); player.onStep = footstep;
   S = newState(12345); buildTrain(null); setupWorld(); train.place(0); player.mode = 'cab';
-  orbit.yaw = 0.9; orbit.h = 4; S.time = 18.6;
+  orbit.yaw = 0.9; orbit.h = 4; S.time = 17.9;
   $('#title').classList.add('ready');
 }
 addEventListener('error', (e) => { const el = $('#err'); if (el) { el.hidden = false; el.textContent = 'Ошибка: ' + e.message; } });
 addEventListener('unhandledrejection', (e) => { const el = $('#err'); if (el) { el.hidden = false; el.textContent = 'Ошибка загрузки: ' + ((e.reason && e.reason.message) || e.reason); } });
 boot();
-window.__dbg = () => ({ S, train, world, zombies, player, task });
+window.__dbg = () => ({ S, train, world, zombies, player, task, renderer, scene, camera, orbit, look, fcam, setCam: (m) => (camMode = m) });
 if ('serviceWorker' in navigator && location.protocol === 'https:' && !location.hostname.endsWith('claude.ai')) navigator.serviceWorker.register('sw.js').catch(() => {});

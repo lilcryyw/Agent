@@ -1,5 +1,5 @@
 import * as THREE from '../vendor/three.module.min.js';
-import { makeLoco, makeBoxcar, makeTank, LOCO_LEN, BOX_LEN, TANK_LEN } from './models.js';
+import { makeLoco, makeBoxcar, makeTank } from './models.js';
 import { worldPos, clamp, mulberry32 } from './util.js';
 
 export const BRAKE_NAMES = ['I', 'II', 'III', 'IV', 'V', 'VI'];
@@ -33,11 +33,12 @@ export class Train {
   build() {
     for (const c of this.cars) { this.scene.remove(c.g); }
     this.cars = [];
-    const loco = makeLoco('1347');
+    const loco = makeLoco();
     this.loco = loco;
-    this.cars.push({ g: loco.g, wheels: loco.wheels, len: LOCO_LEN, kind: 'loco' });
-    if (this.up.tank) { const t = makeTank(this.rng); this.cars.push({ g: t.g, wheels: t.wheels, len: TANK_LEN, kind: 'tank' }); }
-    for (let i = 0; i < this.wagons; i++) { const b = makeBoxcar(this.rng, [0xb0705a, 0x9a6a5a, 0xa87a62][i % 3]); this.cars.push({ g: b.g, wheels: b.wheels, len: BOX_LEN, kind: 'box' }); }
+    const add = (m, kind) => this.cars.push({ g: m.g, wheels: m.wheels, len: m.len, kind, roofY: m.roofY, spots: m.spots });
+    add(loco, 'loco');
+    if (this.up.tank) add(makeTank(this.rng), 'tank');
+    for (let i = 0; i < this.wagons; i++) add(makeBoxcar(this.rng), 'box');
     for (const c of this.cars) this.scene.add(c.g);
     for (const k of ['plow', 'armor', 'light', 'turret']) loco.up[k].visible = !!this.up[k];
     this.place(0);
