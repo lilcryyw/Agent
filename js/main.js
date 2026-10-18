@@ -7,6 +7,7 @@ import { loadChars } from './chars.js';
 import { Player } from './player.js';
 import { Audio } from './audio.js';
 import { ITEMS, CAT_NAMES, WEAPONS, AMMO, LOOT, WAGON_CARGO, LOOT_TIME, UPGRADES, makeUnique, ICONS, itemDesc } from './data.js';
+import { iconImg } from './icons.js';
 
 const $ = (s) => document.querySelector(s);
 const SAVE = 'mp_save_v2', SAFE = 'mp_safe_v2', OPTS = 'mp_opts_v1';
@@ -91,14 +92,14 @@ const _tt = {};
 
 function newState(seed) {
   return {
-    v: 2, seed, time: 7.3, day: 1, hp: 100, food: 85, infected: false, money: 150,
-    pack: { tushenka: 2, voda: 1, bint: 2, pm: 1 }, cargo: { kanistra: 1, grechka: 2, suhari: 2 },
+    v: 2, seed, time: 7.3, day: 1, hp: 100, food: 85, water: 90, infected: false, money: 150, piles: [], play: 0,
+    pack: { tushenka: 2, mineralka: 2, bint: 2, pm: 1 }, cargo: { kanistra: 1, grechka: 2, suhari: 2, voda: 1 },
     uniques: [], ammo: { p9: 36, p12: 0, p545: 0, p762: 0 }, weapon: 'pm',
     kills: 0, found: 0, looted: [], cleared: [], settle: {}, visited: [], weather: { type: 'cloudy', t: 5 }, maxS: 0, tut: 0, log: [],
   };
 }
 function migrate(o) {
-  if (o.v === 2) return o;
+  if (o.v === 2) { if (o.water == null) o.water = 90; if (!o.piles) o.piles = []; if (o.play == null) o.play = 999; return o; }
   const n = Object.assign(newState(o.seed), o, { v: 2 });
   n.cargo = o.inv || {}; n.pack = {};
   for (const id of Object.keys(n.cargo)) if (WEAPONS[id]) { n.pack[id] = n.cargo[id]; delete n.cargo[id]; }
@@ -107,7 +108,7 @@ function migrate(o) {
 }
 function setupWorld() {
   if (world) world.clear();
-  zombies.clear();
+  zombies.clear(); spawned = new Map();
   world = new World(scene, S.seed);
   world.looted = new Set(S.looted); world.cleared = new Set(S.cleared);
   world.prime(train.s);
@@ -126,7 +127,7 @@ function buildTrain(o) {
 function newGame() {
   store.del(SAVE); store.del(SAFE);
   S = newState((Math.random() * 1e9) | 0);
-  buildTrain(null); setupWorld(); enterCab(true); updateCargo(); start();
+  buildTrain(null); setupWorld(); enterCab(true); updateCargo(); start(); syncPiles();
   notify('Депо «Узловая». Город пал. Впереди — тысячи километров пути.', 'radio');
 }
 function snapshot() {
@@ -142,7 +143,7 @@ function loadGame(o) {
   if (pm && pm.mode === 'ground') { player.mode = 'ground'; player.pos.set(pm.x, 0, pm.z); player.root.visible = true; }
   else if (pm && pm.mode === 'roof') { player.mode = 'roof'; player.off = pm.off; player.d = pm.d; player.root.visible = true; }
   else enterCab(true);
-  updateCargo(); start();
+  updateCargo(); start(); syncPiles();
 }
 function start() {
   running = true; paused = false; task = null; lootPending = null;
@@ -214,9 +215,18 @@ const zctx = {
     if (S.hp <= 0) gameOver(outside ? 'Вас загрызли.' : 'Зомби ворвались в кабину.');
   },
   onKill() { S.kills++; },
-  sound(kind, z, dist) { if (kind === 'groan') audio.groan(1 - dist / 45); else if (kind === 'splat') audio.splat(); },
+  trainNoise: 0,
+  sound(kind, z, dist) {
+    const pos = z.h.root.position;
+    if (kind === 'groan') audio.groan(1 - dist / 50, pos, z.t.run);
+    else if (kind === 'splat') audio.splat(pos);
+    else if (kind === 'notice') audio.play('z_growl', { pos, vol: 1.1, vary: 0.15 });
+    else if (kind === 'attack') audio.play('z_attack', { pos, vol: 1.2, vary: 0.1 });
+    else if (kind === 'bang') audio.play('hit_metal', { pos, vol: 0.6, vary: 0.25 });
+    else if (kind === 'step') audio.play(groundSurface(pos), { pos, vol: 0.45, rate: 0.78, vary: 0.1, ref: 2 });
+  },
   scream(z) {
-    audio.scream(); notify('Крикун созывает мертвецов!', 'alert');
+    audio.scream(z.h.root.position); zombies.alarm(z.h.root.position.x, z.h.root.position.z, 90); notify('Крикун созывает мертвецов!', 'alert');
     const r = Math.random, p = z.h.root.position;
     for (let i = 0; i < RI(r, 3, 6); i++) { const a = r() * 6.28, d = R(r, 25, 60); zombies.spawn(r() < 0.4 ? 'runner' : 'walker', p.x + Math.cos(a) * d, p.z + Math.sin(a) * d, train.s / 1000, r); }
   },
@@ -224,11 +234,12 @@ const zctx = {
 
 // ---------------- игровой цикл
 let last = performance.now();
+const _ld = new THREE.Vector3();
 function frame(now) {
   requestAnimationFrame(frame);
   const dt = Math.min(0.05, (now - last) / 1000); last = now;
   if (running && !paused) step(dt);
-  if (train) { updateCamera(dt); renderer.render(scene, camera); }
+  if (train) { updateCamera(dt); renderer.render(scene, camera); camera.getWorldDirection(_ld); audio.listen(camera.position, _ld); }
   if (running) { noteTick(dt); hudT -= dt; if (hudT <= 0) { hudT = 0.12; updateHud(); } drawDash(); }
 }
 function env() {
@@ -275,7 +286,12 @@ function step(dt) {
   S.food = Math.max(0, S.food - dt * 0.06);
   if (S.food <= 0) { S.hp -= dt * 0.25; if (S.hp <= 0) return gameOver('Вы умерли от голода.'); }
   if (S.infected) { S.hp -= dt * 0.12; if (S.hp <= 0) return gameOver('Инфекция взяла своё.'); }
-  if (S.food > 60 && !S.infected) S.hp = Math.min(100, S.hp + dt * 0.04);
+  S.water = Math.max(0, S.water - dt * 0.085);
+  if (S.water <= 0) { S.hp -= dt * 0.35; if (S.hp <= 0) return gameOver('Вы умерли от жажды.'); }
+  if (S.food > 60 && S.water > 50 && !S.infected) S.hp = Math.min(100, S.hp + dt * 0.04);
+  S.play += dt;
+  if ((S.water < 20 || S.food < 15) && !S.warnNeed) { S.warnNeed = true; notify(S.water < 20 ? 'Сильно хочется пить.' : 'Живот сводит от голода.', 'me'); }
+  if (S.water > 30 && S.food > 25) S.warnNeed = false;
   spawn(dt);
   zctx.train = train; zctx.player = player;
   zombies.update(dt, zctx);
@@ -305,21 +321,62 @@ function newWeather(season) {
   const t = season === 'winter' ? [['cloudy', 2], ['snow', 3], ['clear', 2], ['fog', 1]] : season === 'autumn' ? [['cloudy', 3], ['rain', 3], ['fog', 2], ['clear', 1]] : [['clear', 3], ['cloudy', 3], ['rain', 2], ['fog', 1]];
   S.weather = { type: wpick(r, t), t: R(r, 3, 8) };
 }
+// зомби там, где жили люди: чем больше домов и квартир рядом, тем больше мертвецов
+const POP = { apartment: 7, shop_food: 3, shop_med: 3, shop_hoz: 2, shop_auto: 2, shop_hunt: 2, kiosk: 1, station: 4, police: 5, hospital: 6, school: 5,
+  house: 1.5, dacha: 0.8, garage: 0.7, factory: 2.5, church: 1.5, military: 4, azs: 1.5, car: 0.4, wagon_box: 0.4, wagon_tank: 0.2, ruins: 0.6 };
+const ZBASE = { forest: 2, field: 1.5, swamp: 3, village: 2, dacha: 2, town: 4, industrial: 3, settlement: 0 };
+let spawned = new Map();
 function spawn(dt) {
-  spawnT -= dt; if (spawnT > 0) return; spawnT = 0.9;
-  const zone = world.zoneAt(train.s + 60), km = train.s / 1000;
-  const night = S.time < 5.5 || S.time > 21;
-  const dens = ZONE_DENSITY[zone] * (night ? 1.5 : 1) * (S.weather.type === 'fog' ? 1.2 : 1);
-  const want = Math.min(30, Math.round(dens * 20 * (1 + km / 150)));
-  if (zombies.alive >= want || zone === 'settlement' || train.s < 400) return;
-  const r = Math.random, n = RI(r, 1, Math.min(5, 2 + Math.floor(km / 15)));
-  let s, d;
-  if (player.mode === 'ground' && r() < 0.6) { toTrack(player.pos.x, player.pos.z, _tt); s = _tt.s + R(r, -60, 60); d = _tt.d + (r() < 0.5 ? -1 : 1) * R(r, 25, 55); }
-  else if (Math.abs(train.v) < 1) { s = train.s + R(r, -130, 140); d = (r() < 0.5 ? -1 : 1) * R(r, 18, 75); }
-  else { s = train.s + R(r, 70, 280); d = (r() < 0.5 ? -1 : 1) * R(r, 6, 90); }
-  if (world.zoneAt(s) === 'settlement') return;
-  const season = world.seasonAt(s);
-  for (let i = 0; i < n; i++) { const p = worldPos(s + R(r, -8, 8), d + R(r, -8, 8)); zombies.spawn(zombies.pickType(r, km, season), p.x, p.z, km, r); }
+  spawnT -= dt; if (spawnT > 0) return; spawnT = 1;
+  // спокойное начало: можно осмотреться и собрать первый лут
+  if (S.maxS < 2600 || S.play < 240) { if (!S.calmMsg) { S.calmMsg = true; } return; }
+  if (!S.calmEnd) { S.calmEnd = true; notify('Вдали слышны стоны. Мертвецы рядом — дальше будьте осторожны.', 'alert'); }
+  const ramp = clamp((S.maxS - 2600) / 3000, 0.3, 1), km = train.s / 1000;
+  const foot = player.mode !== 'cab';
+  const cx = foot ? player.pos.x : train.loco.g.position.x, cz = foot ? player.pos.z : train.loco.g.position.z;
+  const ahead = !foot && train.v > 5 ? worldPos(train.s + 150, 0) : null;
+  const ox = ahead ? ahead.x : cx, oz = ahead ? ahead.z : cz;
+  toTrack(ox, oz, _tt);
+  const zone = world.zoneAt(_tt.s);
+  if (zone === 'settlement' || train.s < 400) return;
+  const night = S.time < 5.5 || S.time > 21 ? 1.5 : 1;
+  const homes = []; let pop = 0;
+  for (const L of world.loot.values()) {
+    const d = Math.hypot(L.x - ox, L.z - oz); if (d > 170 || d < 18) continue;
+    const cap = Math.round((POP[L.type] || 1) * 1.4) + 1, left = cap - (spawned.get(L.id) || 0);
+    if (left <= 0) continue;
+    const w = POP[L.type] || 1; pop += w; homes.push([L, w * Math.min(1, left / cap)]);
+  }
+  const want = Math.min(30, Math.round((pop * 0.5 + (ZBASE[zone] || 2)) * ramp * night * (1 + km / 200)));
+  if (zombies.alive >= want) return;
+  const r = Math.random, season = world.seasonAt(_tt.s);
+  if (homes.length) {
+    const L = wpick(r, homes.map(([L, w]) => [L, w]));
+    const n = Math.min(want - zombies.alive, RI(r, 1, (POP[L.type] || 1) > 3 ? 3 : 1));
+    for (let i = 0; i < n; i++) {
+      let type = zombies.pickType(r, km, season);
+      if ((L.type === 'military' || L.type === 'police') && r() < 0.5) type = 'soldier';
+      const x = L.x + R(r, -3, 3), z = L.z + R(r, -3, 3);
+      zombies.spawn(type, x, z, km, r, { x: L.x, z: L.z });
+      spawned.set(L.id, (spawned.get(L.id) || 0) + 1);
+    }
+  } else {
+    const a = r() * 6.28, d = R(r, 60, 150), x = ox + Math.cos(a) * d, z = oz + Math.sin(a) * d;
+    toTrack(x, z, _tt); if (world.zoneAt(_tt.s) === 'settlement') return;
+    zombies.spawn(zombies.pickType(r, km, season), x, z, km, r);
+  }
+}
+function groundSurface(p) {
+  toTrack(p.x, p.z, _tt);
+  if (world.seasonAt(_tt.s) === 'winter' && Math.abs(_tt.d) > 2.4) return 'st_snow';
+  if (Math.abs(_tt.d) < 2.4) return 'st_gravel';
+  if (p.y > 0.8) return 'st_concrete';
+  const z = world.zoneAt(_tt.s);
+  return z === 'town' || z === 'industrial' || z === 'settlement' ? (Math.random() < 0.7 ? 'st_concrete' : 'st_grass') : 'st_grass';
+}
+function footstep(kind, vol) {
+  const k = kind === 'metal' ? 'st_metal' : groundSurface(player.pos);
+  audio.play(k, { vol: vol * (k === 'st_metal' ? 0.8 : 1.1), vary: 0.12 });
 }
 function guards(dt) {
   guardT -= dt; if (guardT > 0) return; guardT = 0.7;
@@ -373,13 +430,14 @@ function enterCab(instant) {
   const doors = trainSpots().filter((s) => s.kind === 'door');
   const dd = doors.map((s) => [spotPos(s).distanceTo(player.pos), s]).sort((a, b) => a[0] - b[0])[0][1];
   player.climb([{ p: player.pos.clone() }, { rel: true, off: dd.off, d: dd.d, y: 0.4 }, { rel: true, off: dd.off, d: dd.f * 1.5, y: 2.1 }], 'cab', 1.2);
-  audio.click();
+  audio.play('door_open', { vol: 0.8, delay: 0.5 }); audio.play('door_close', { vol: 0.8, delay: 1.25 });
 }
 function exitCab() {
   if (Math.abs(train.v) > 0.4) return notify('Сначала остановите поезд.', 'me');
   const side = orbitSide();
   const door = trainSpots().find((s) => s.kind === 'door' && s.f === side);
   train.pos = 0; if (train.brake < 3) train.brake = 3;
+  audio.play('door_open', { vol: 0.8 }); audio.play('door_close', { vol: 0.7, delay: 0.9 });
   player.pos.copy(worldPos(train.s + door.off, door.f * 1.5)); player.pos.y = 2.1;
   player.root.visible = true;
   player.climb([{ p: player.pos.clone() }, { rel: true, off: door.off, d: door.d, y: 0.4 }, { rel: true, off: door.off, d: door.f * 3.2, y: 0.4 }], 'ground', 1.1);
@@ -407,6 +465,7 @@ function taskTick(dt) {
   if (!task) return;
   if (player.pos.distanceTo(task.at) > 0.8) { task = null; $('#prog').hidden = true; notify('Обыск брошен.', 'me'); return; }
   task.t += dt;
+  task.snd = (task.snd || 0) - dt; if (task.snd <= 0) { task.snd = 0.9 + Math.random() * 0.6; audio.play(task.kind === 'loot' ? 'cloth' : 'smash_wood', { vol: 0.7, vary: 0.2 }); }
   $('#prog .pb u').style.width = (100 * Math.min(1, task.t / task.total)).toFixed(0) + '%';
   if (task.t < task.total) return;
   const T0 = task; task = null; $('#prog').hidden = true;
@@ -476,6 +535,7 @@ function fire(z) {
   if ((S.ammo[W.ammo] || 0) <= 0) { notify('Нет патронов ' + AMMO[W.ammo].n, 'me'); audio.click(); fireCd = 0.6; return; }
   S.ammo[W.ammo]--; fireCd = W.rate; audio.shot(W.snd);
   shotOrigin(_o);
+  zombies.alarm(_o.x, _o.z, { pistol: 55, smg: 65, rifle: 110, shotgun: 80, sniper: 150 }[W.snd] || 70);
   if (!z) {
     const f = new THREE.Vector3(); camera.getWorldDirection(f);
     if (player.mode !== 'cab') { player.aimDir.copy(f); player.aimT = 0.6; }
@@ -488,7 +548,7 @@ function fire(z) {
   let dmg = 0, hits = 0;
   for (let i = 0; i < W.pellets; i++) if (r() < hitP) { hits++; dmg += W.dmg * (W.pellets > 1 ? clamp(1 - d3 / W.range * 0.7, 0.2, 1) : 1); }
   const headShot = hits > 0 && r() < 0.18;
-  if (hits) { if (zombies.hit(z, dmg, headShot)) zctx.onKill(z); bleed(_p); tracer(_o, _p); if (headShot) hitMark(); }
+  if (hits) { const dead = zombies.hit(z, dmg, headShot); audio.play('flesh', { pos: z.h.root.position, vol: 0.9, vary: 0.2 }); if (dead) { zctx.onKill(z); audio.play(Math.random() < 0.5 ? 'z_death' : 'body_fall', { pos: z.h.root.position, vol: 0.8, delay: 0.15 }); } bleed(_p); tracer(_o, _p); if (headShot) hitMark(); }
   else tracer(_o, _p.clone().add(new THREE.Vector3(R(r, -1.5, 1.5), R(r, -0.5, 1.2), R(r, -1.5, 1.5))));
 }
 function tracer(a, b) {
@@ -653,7 +713,7 @@ function setPos(p) {
   if (p > 0 && train.rev === 0) { notify('Реверсор в нуле — выберите «В».', 'me'); return; }
   train.pos = p; audio.click();
 }
-function setBrake(b) { b = clamp(Math.round(b), 0, 5); if (b !== train.brake) { train.brake = b; audio.click(); } }
+function setBrake(b) { b = clamp(Math.round(b), 0, 5); if (b !== train.brake) { const was = train.brake; train.brake = b; audio.click(); if (b >= 4 && was < 4) audio.play('hiss', { vol: b === 5 ? 1 : 0.6 }); else if (b <= 1 && was >= 2 && train.TC > 0.3) audio.play('hiss', { vol: 0.4, rate: 1.3 }); } }
 function lever(el, n, set, invert) {
   const calc = (e) => { const r = el.querySelector('.rail').getBoundingClientRect(); const k = clamp((e.clientY - r.top) / r.height, 0, 1); return invert ? (1 - k) * (n - 1) : k * (n - 1); };
   el.addEventListener('pointerdown', (e) => { el.setPointerCapture(e.pointerId); el._d = true; set(calc(e)); e.preventDefault(); });
@@ -670,8 +730,9 @@ function bindUi() {
   const kr = $('#kr .notches'); BRAKE_NAMES.forEach((n) => kr.insertAdjacentHTML('beforeend', `<i>${n}</i>`));
   lever($('#km'), 16, (v) => setPos(v), true);
   lever($('#kr'), 6, (v) => setBrake(v), false);
-  hold($('#bHorn'), () => audio.set(audio.horn, 0.22, 0.03), () => audio.set(audio.horn, 0, 0.05));
+  hold($('#bHorn'), () => { audio.hornOn(); const p = train.loco.g.position; zombies.alarm(p.x, p.z, 160); }, () => audio.hornOff());
   hold($('#bSand'), () => (train.sanding = true), () => (train.sanding = false));
+  addEventListener('keydown', (e) => { if (!running || paused || player.mode === 'cab') return; if (e.key === 'Shift') player.run = !player.run; if (e.key.toLowerCase() === 'c') player.crouch = !player.crouch; });
   hold($('#bFire'), () => { fireHeld = true; fire(autoTarget()); }, () => (fireHeld = false));
   $('#bRB').addEventListener('click', () => { train.pressVigilance(); audio.click(); });
   $('#bEngine').addEventListener('click', () => {
@@ -701,11 +762,11 @@ function bindUi() {
       if (k === 's' || k === 'arrowdown') setPos(train.pos - 1);
       if (k >= '1' && k <= '6') setBrake(+k - 1);
       if (k === ' ') train.pressVigilance();
-      if (k === 'h') audio.set(audio.horn, 0.22, 0.03);
+      if (k === 'h') audio.hornOn();
     } else if (k === ' ') { fireHeld = true; fire(autoTarget()); }
     if (k === 'e') { const b = document.querySelector('#ctx button'); if (b) b.click(); }
   });
-  addEventListener('keyup', (e) => { const k = e.key.toLowerCase(); keys[k] = false; if (k === 'h') audio.set(audio.horn, 0, 0.05); if (k === ' ') fireHeld = false; });
+  addEventListener('keyup', (e) => { const k = e.key.toLowerCase(); keys[k] = false; if (k === 'h') audio.hornOff(); if (k === ' ') fireHeld = false; });
 }
 function act(a, ds) {
   audio.init();
@@ -739,14 +800,17 @@ function act(a, ds) {
     case 'sel': invSel = { w: ds.w, id: ds.id, uid: ds.uid }; showInv(); break;
     case 'use': useItem(ds.w, ds.id); break;
     case 'move': moveItem(ds.w, ds.id, ds.uid, ds.all === '1'); break;
-    case 'drop': dropItem(ds.w, ds.id, ds.uid); break;
+    case 'drop': dropItem(ds.w, ds.id, ds.uid, ds.all === '1'); break;
+    case 'pick': pickPile(ds.id); break;
+    case 'run': player.run = !player.run; if (player.run) player.crouch = false; break;
+    case 'crouch': player.crouch = !player.crouch; if (player.crouch) player.run = false; break;
     case 'takeLoot': takeLoot(ds.to); break;
     case 'opt': opts[ds.k] = !opts[ds.k]; store.set(OPTS, opts); applyOpts(); showMenu(); break;
     case 'quit': saveGame(); running = false; closeModal(); $('#hud').hidden = true; showTitle(); break;
   }
 }
 function applyOpts() {
-  audio.on = opts.sound; if (!opts.sound && audio.ctx) { audio.set(audio.eng, 0); audio.set(audio.hiss, 0); audio.set(audio.wind, 0); }
+  audio.on = opts.sound; if (audio.master) audio.master.gain.value = opts.sound ? 0.9 : 0;
   if (train) train.vigOn = opts.vig;
   renderer.setPixelRatio(Math.min(devicePixelRatio, opts.hq ? 2 : 1.3)); resize();
 }
@@ -771,10 +835,10 @@ const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&l
 let lootPending = null;
 function lootRow(e, i) {
   let name, w = 0, note = '', ic = '📦';
-  if (e.money) { name = `Деньги: ${e.money} ₽`; note = 'сразу'; ic = '💵'; }
-  else if (e.ammo) { name = `Патроны ${AMMO[e.ammo].n} ×${e.n}`; note = 'сразу'; ic = '🎯'; }
-  else if (e.fuel) { name = `Солярка из цистерны: ${e.fuel} л`; note = 'шлангом в бак'; ic = '⛽'; }
-  else if (e.unique) { name = e.unique.n; w = e.unique.w; note = 'находка'; ic = '✉️'; }
+  if (e.money) { name = `Деньги: ${e.money} ₽`; note = 'сразу'; ic = icon('_money'); }
+  else if (e.ammo) { name = `Патроны ${AMMO[e.ammo].n} ×${e.n}`; note = 'сразу'; ic = icon('_ammo'); }
+  else if (e.fuel) { name = `Солярка из цистерны: ${e.fuel} л`; note = 'шлангом в бак'; ic = icon('_fuel'); }
+  else if (e.unique) { name = e.unique.n; w = e.unique.w; note = 'находка'; ic = icon(null, e.unique.n); }
   else { const it = ITEMS[e.id]; name = it.n + (e.qty > 1 ? ' ×' + e.qty : ''); w = it.w * e.qty; note = itemDesc(e.id); ic = icon(e.id); }
   return `<label class="lrow"><input type="checkbox" id="lt${i}" data-i="${i}" checked><span class="ic">${ic}</span><span>${esc(name)}<i>${esc(note)}</i></span><b>${w ? w.toFixed(1) + ' кг' : ''}</b></label>`;
 }
@@ -799,12 +863,12 @@ function takeLoot(to) {
     else if (e.unique) S.uniques.push(Object.assign(e.unique, { where: to }));
     else { add(to, e.id, e.qty); if (WEAPONS[e.id] && to === 'pack' && !S.weapon) S.weapon = e.id; }
   }
-  if (picked.length) audio.coin();
+  if (picked.length) { audio.play('cloth', { vol: 0.8 }); if (picked.some((e) => e.money)) audio.coin(); }
   lootPending = null; updateCargo(); closeModal();
 }
 
 let invSel = null;
-function icon(id) { return WEAPONS[id] ? `<em class="gun">${WEAPONS[id].n}</em>` : ICONS[id] || '📦'; }
+function icon(id, un) { return iconImg(id, un); }
 function tiles(where) {
   const ids = Object.keys(S[where]).filter((id) => ITEMS[id]).sort((a, b) => ITEMS[a].c.localeCompare(ITEMS[b].c));
   let h = '';
@@ -814,7 +878,7 @@ function tiles(where) {
   }
   for (const u of S.uniques) if (u.where === where) {
     const on = invSel && invSel.uid === u.uid;
-    h += `<button class="tile ${on ? 'on' : ''}" data-act="sel" data-w="${where}" data-uid="${u.uid}"><span>✉️</span><i>${esc(u.n)}</i></button>`;
+    h += `<button class="tile ${on ? 'on' : ''}" data-act="sel" data-w="${where}" data-uid="${u.uid}"><span>${icon(null, u.n)}</span><i>${esc(u.n)}</i></button>`;
   }
   return h || '<p class="sub empty">Пусто</p>';
 }
@@ -827,13 +891,13 @@ function showInv() {
     const it = id ? ITEMS[id] : null;
     if ((it && S[w][id]) || u) {
       const other = w === 'pack' ? 'cargo' : 'pack';
-      const use = it ? (it.food ? 'Съесть' : it.hp || it.cure ? 'Принять' : it.fuel ? 'Залить в бак' : it.repair ? 'Починить поезд' : it.weapon ? (S.weapon === id ? '' : 'Взять в руки') : '') : '';
+      const use = it ? (it.c === 'drink' ? 'Выпить' : it.food ? 'Съесть' : it.water ? 'Выпить' : it.hp || it.cure ? 'Принять' : it.fuel ? 'Залить в бак' : it.repair ? 'Починить поезд' : it.weapon ? (S.weapon === id ? '' : 'Взять в руки') : '') : '';
       const needTrain = it && (it.fuel || it.repair);
-      det = `<div class="det"><span class="big">${u ? '✉️' : icon(id)}</span><div><b>${esc(u ? u.n : it.n)}${it && S[w][id] > 1 ? ' ×' + S[w][id] : ''}</b><i>${u ? 'Находка — ценится у коллекционеров' : itemDesc(id)} · ${(u ? u.w : it.w).toFixed(2)} кг</i></div>
+      det = `<div class="det"><span class="big">${u ? icon(null, u.n) : icon(id)}</span><div><b>${esc(u ? u.n : it.n)}${it && S[w][id] > 1 ? ' ×' + S[w][id] : ''}</b><i>${u ? 'Находка — ценится у коллекционеров' : itemDesc(id)} · ${(u ? u.w : it.w).toFixed(2)} кг</i></div>
         <div class="row">${use && (!needTrain || near) && !(it.weapon && w !== 'pack') ? `<button class="pri" data-act="use" data-w="${w}" data-id="${id}">${use}</button>` : ''}
         ${near ? `<button data-act="move" data-w="${w}" data-id="${id || ''}" data-uid="${uid || ''}">${other === 'pack' ? 'В рюкзак' : 'В вагон'}</button>` : ''}
         ${near && it && S[w][id] > 1 ? `<button data-act="move" data-w="${w}" data-id="${id}" data-all="1">Все</button>` : ''}
-        <button class="ghost" data-act="drop" data-w="${w}" data-id="${id || ''}" data-uid="${uid || ''}">Выбросить</button></div></div>`;
+        <button class="ghost" data-act="drop" data-w="${w}" data-id="${id || ''}" data-uid="${uid || ''}">Выбросить</button>${it && S[w][id] > 1 ? `<button class="ghost" data-act="drop" data-w="${w}" data-id="${id}" data-all="1">Выбросить все</button>` : ''}</div></div>`;
     } else invSel = null;
   }
   const W = S.weapon ? WEAPONS[S.weapon] : null;
@@ -846,12 +910,17 @@ function showInv() {
 function useItem(w, id) {
   const it = ITEMS[id]; if (!it || !S[w][id]) return;
   if (it.weapon) { S.weapon = id; showInv(); return; }
-  if (it.food) { if (S.food >= 99) return notify('Вы сыты.', 'me'); S.food = Math.min(100, S.food + it.food); }
+  if (it.food || it.water) {
+    if ((it.water || 0) > 0 && !it.food && S.water >= 99) return notify('Пить не хочется.', 'me');
+    if (it.food && !(it.water > 0) && S.food >= 99) return notify('Вы сыты.', 'me');
+    S.food = clamp(S.food + (it.food || 0), 0, 100); S.water = clamp(S.water + (it.water || 0), 0, 100); if (it.hp) S.hp = clamp(S.hp + it.hp, 1, 100);
+    audio.play(it.water > 0 && it.c === 'drink' ? 'drink' : 'eat', { vol: 0.9 }); if (it.c === 'drink') audio.play('bottle', { vol: 0.6 });
+  }
   else if (it.hp || it.cure) { S.hp = Math.min(100, S.hp + (it.hp || 0)); if (it.cure && S.infected) { S.infected = false; notify('Инфекция остановлена.', 'good'); } }
   else if (it.fuel) { if (train.fuel >= train.fuelMax - 1) return notify('Бак полный.', 'me'); train.fuel = Math.min(train.fuelMax, train.fuel + it.fuel); }
   else if (it.repair) { if (train.dur >= train.durMax) return notify('Поезд цел.', 'me'); train.dur = Math.min(train.durMax, train.dur + it.repair * train.durMax / 100); }
   else return;
-  take(w, id); updateCargo(); audio.click(); showInv();
+  take(w, id); updateCargo(); showInv();
 }
 function moveItem(w, id, uid, all) {
   const to = w === 'pack' ? 'cargo' : 'pack';
@@ -870,11 +939,40 @@ function moveItem(w, id, uid, all) {
   }
   updateCargo(); audio.click(); showInv();
 }
-function dropItem(w, id, uid) {
-  if (uid) S.uniques = S.uniques.filter((u) => u.uid !== uid); else take(w, id, 1);
-  updateCargo(); showInv();
+function dropItem(w, id, uid, all) {
+  const p = player.mode === 'ground' ? player.pos : worldPos(train.s - 2.6, 3.2);
+  let pile = S.piles.find((q) => Math.hypot(q.x - p.x, q.z - p.z) < 2);
+  if (!pile) { pile = { id: 'p' + Date.now(), x: p.x + (Math.random() - 0.5), z: p.z + (Math.random() - 0.5), items: {}, uniques: [] }; S.piles.push(pile); }
+  if (uid) { const u = S.uniques.find((x) => x.uid === uid); if (u) { S.uniques = S.uniques.filter((x) => x !== u); pile.uniques.push(u); } }
+  else { const n = all ? S[w][id] : 1; take(w, id, n); pile.items[id] = (pile.items[id] || 0) + n; }
+  audio.play('drop', { vol: 0.8 });
+  syncPiles(); updateCargo(); showInv();
 }
-
+// мешки с выброшенными вещами
+const pileMeshes = new Map();
+const sackGeo = new THREE.SphereGeometry(0.35, 8, 6); sackGeo.scale(1, 0.7, 1); sackGeo.translate(0, 0.22, 0);
+const sackMat = new THREE.MeshLambertMaterial({ color: 0x8a7458 });
+function syncPiles() {
+  S.piles = S.piles.filter((q) => Object.keys(q.items).length || q.uniques.length);
+  for (const [id, m] of pileMeshes) if (!S.piles.find((q) => q.id === id)) { scene.remove(m); pileMeshes.delete(id); }
+  for (const q of S.piles) if (!pileMeshes.has(q.id)) {
+    toTrack(q.x, q.z, _tt);
+    const m = new THREE.Mesh(sackGeo, sackMat); m.position.set(q.x, zctx.groundH(_tt.s, _tt.d), q.z); scene.add(m); pileMeshes.set(q.id, m);
+  }
+}
+function pickPile(pid) {
+  const q = S.piles.find((x) => x.id === pid); if (!q) return;
+  let left = 0;
+  for (const [id, n] of Object.entries(q.items)) {
+    const can = Math.min(n, Math.floor((PACK_MAX - kg('pack') + 1e-6) / Math.max(0.01, wOf(id))));
+    if (can > 0) { add('pack', id, can); q.items[id] -= can; }
+    if (q.items[id] <= 0) delete q.items[id]; else left++;
+  }
+  q.uniques = q.uniques.filter((u) => { if (kg('pack') + u.w <= PACK_MAX) { u.where = 'pack'; S.uniques.push(u); return false; } left++; return true; });
+  audio.play('cloth', { vol: 0.8 });
+  if (left) notify('Не всё влезло в рюкзак — остальное в мешке.', 'me');
+  syncPiles(); updateCargo();
+}
 function kindName(st) { return { depot: 'депо', halt: 'остановочный пункт', station: 'станция', town: 'город', settlement: 'поселение' }[st.kind]; }
 function showMap() {
   const list = world.nextStations(train.s, 7);
@@ -950,12 +1048,12 @@ function showTrade(tab) {
       const p = sellP(d, id), sat = (d.sold[id] || 0) > 1.5;
       rows.push(`<div class="trow"><span class="ic">${icon(id)}</span><span>${esc(ITEMS[id].n)} <i>×${S[w][id]} · ${w === 'pack' ? 'рюкзак' : 'вагон'}${sat ? ' · <em class="warn">рынок завален</em>' : ''}</i></span><b>${p} ₽</b><button data-act="sell" data-w="${w}" data-id="${id}">Продать</button>${S[w][id] > 1 ? `<button class="ghost" data-act="sell" data-w="${w}" data-id="${id}" data-all="1">Все</button>` : '<span></span>'}</div>`);
     }
-    for (const u of S.uniques) if (near || u.where === 'pack') rows.push(`<div class="trow"><span class="ic">✉️</span><span>${esc(u.n)} <i>находка</i></span><b>${Math.round(u.v * d.dem.valuable * 0.85)} ₽</b><button data-act="sellU" data-uid="${u.uid}">Продать</button><span></span></div>`);
+    for (const u of S.uniques) if (near || u.where === 'pack') rows.push(`<div class="trow"><span class="ic">${icon(null, u.n)}</span><span>${esc(u.n)} <i>находка</i></span><b>${Math.round(u.v * d.dem.valuable * 0.85)} ₽</b><button data-act="sellU" data-uid="${u.uid}">Продать</button><span></span></div>`);
     h += rows.join('') || '<p class="sub">Продавать нечего.</p>';
   } else if (tab === 'buy') {
     const lp = Math.round(100 * 1.1 * d.dem.fuel);
-    h += `<div class="trow"><span class="ic">⛽</span><span>Солярка 100 л <i>в баке ${train.fuel.toFixed(0)}/${train.fuelMax}</i></span><b>${lp} ₽</b><button data-act="buyFuel" data-l="100">Купить</button><span></span></div>`;
-    for (const a of d.ammo) h += `<div class="trow"><span class="ic">🎯</span><span>Патроны ${AMMO[a].n} ×10 <i>есть ${S.ammo[a] || 0}</i></span><b>${Math.round(AMMO[a].v * 13 * Math.max(0.8, d.dem.weapon))} ₽</b><button data-act="buyAmmo" data-a="${a}">Купить</button><span></span></div>`;
+    h += `<div class="trow"><span class="ic">${icon('_fuel')}</span><span>Солярка 100 л <i>в баке ${train.fuel.toFixed(0)}/${train.fuelMax}</i></span><b>${lp} ₽</b><button data-act="buyFuel" data-l="100">Купить</button><span></span></div>`;
+    for (const a of d.ammo) h += `<div class="trow"><span class="ic">${icon('_ammo')}</span><span>Патроны ${AMMO[a].n} ×10 <i>есть ${S.ammo[a] || 0}</i></span><b>${Math.round(AMMO[a].v * 13 * Math.max(0.8, d.dem.weapon))} ₽</b><button data-act="buyAmmo" data-a="${a}">Купить</button><span></span></div>`;
     for (const [id, q] of Object.entries(d.stock)) if (q > 0) h += `<div class="trow"><span class="ic">${icon(id)}</span><span>${esc(ITEMS[id].n)} <i>${itemDesc(id)} · в наличии ${q}</i></span><b>${buyP(d, id)} ₽</b><button data-act="buy" data-id="${id}">Купить</button><span></span></div>`;
   } else if (tab === 'up') {
     for (const id of d.ups) {
@@ -1015,7 +1113,11 @@ function service(s) {
 // ---------------- интерфейс
 function updateHud() {
   const bar = (sel, v, low) => { const el = $(sel); el.querySelector('u').style.width = clamp(v, 0, 100) + '%'; el.classList.toggle('low', v < low); };
-  bar('#sHp', S.hp, 30); bar('#sFood', S.food, 20); bar('#sFuel', train.fuel / train.fuelMax * 100, 15); bar('#sDur', train.dur / train.durMax * 100, 30);
+  bar('#sHp', S.hp, 30); bar('#sFood', S.food, 20); bar('#sWater', S.water, 20); bar('#sFuel', train.fuel / train.fuelMax * 100, 15); bar('#sDur', train.dur / train.durMax * 100, 30);
+  $('#sHp em').textContent = Math.ceil(S.hp); $('#sFood em').textContent = Math.round(S.food); $('#sWater em').textContent = Math.round(S.water);
+  $('#stam u').style.width = player.stam + '%'; $('#stam').classList.toggle('low', player.stam < 25);
+  $('#bRun').classList.toggle('on', player.run); $('#bCrouch').classList.toggle('on', player.crouch);
+  player.setWeapon(S.weapon);
   $('#sHp').classList.toggle('inf', S.infected);
   const wName = { clear: 'ясно', cloudy: 'пасмурно', rain: 'дождь', fog: 'туман', snow: 'снег' }[S.weather.type];
   const nx = world.nextStations(train.s + 100, 1)[0];
@@ -1068,6 +1170,7 @@ function contextActions() {
         if (sp.kind === 'ladder' && d < 1.8) B('up', 'На крышу', `data-i="${i}"`);
       });
       if (st) B('trade', 'Торговля', '', 'gold');
+      for (const q of S.piles) if (Math.hypot(q.x - player.pos.x, q.z - player.pos.z) < 2.2) B('pick', 'Подобрать мешок', `data-id="${q.id}"`);
       for (const o of world.obstacles.values()) { const p = worldPos(o.s, 0); if (p.distanceTo(player.pos) < 6) B('clear', 'Разобрать завал', `data-id="${o.id}"`); }
       const cand = [];
       for (const L of world.loot.values()) {
@@ -1093,8 +1196,11 @@ function drawDash() {
   audio.engine(train.rpm, train.pos / 15, train.engine);
   if (audio.ctx) {
     const dropping = train.brake >= 4 && train.TM > 0.2;
-    audio.set(audio.hiss, dropping ? (train.brake === 5 ? 0.35 : 0.12) : train.brake === 0 && train.TM < 5.5 ? 0.08 : 0);
-    audio.set(audio.wind, Math.min(0.25, Math.abs(train.v) / 120));
+    audio.set(audio.hissN, dropping ? (train.brake === 5 ? 0.18 : 0.06) : train.brake === 0 && train.TM < 5.5 ? 0.05 : 0);
+    audio.rolling(train.v);
+    audio.ambience({ clear: 0.3, cloudy: 0.6, rain: 1, fog: 0.4, snow: 1.2 }[S.weather.type] || 0.5, player.mode === 'cab' ? train.v : 0);
+    zctx.trainNoise = train.engine ? 50 + Math.abs(train.v) * 4 : 12;
+    if (Math.random() < 0.0008 && S.time > 6 && S.time < 20) audio.play('crows', { vol: 0.35 });
     audio.set(audio.slipS, train.slip ? 0.15 : 0);
   }
   if ($('#cabHud').hidden) return;
@@ -1126,11 +1232,11 @@ function loadTextures(prog) {
 }
 function showTitle() { $('#title').hidden = false; $('#bCont').hidden = !store.get(SAVE); }
 async function boot() {
-  resize(); bindUi(); showTitle();
+  resize(); bindUi(); showTitle(); audio.preload();
   requestAnimationFrame(frame);
   let a = 0, b = 0; const pr = () => ($('#loadbar u').style.width = ((a * 0.4 + b * 0.6) * 100) + '%');
   await Promise.all([loadTextures((k) => { a = k; pr(); }), loadChars((k) => { b = k; pr(); })]);
-  player = new Player(scene);
+  player = new Player(scene); player.onStep = footstep;
   S = newState(12345); buildTrain(null); setupWorld(); train.place(0); player.mode = 'cab';
   orbit.yaw = 0.9; orbit.h = 4; S.time = 18.6;
   $('#title').classList.add('ready');

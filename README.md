@@ -37,6 +37,16 @@
 
 На компьютере: в кабине W/S — контроллер, 1–6 — кран, пробел — РБ, H — тифон; пешком WASD — ходьба, пробел — огонь, E — действие.
 
+## Звук
+
+Настоящие записи, все бесплатные для игр:
+- зомби: OpenGameArt — «Zombies Sound Pack», «Zombie noises and moans», «Undead moans», «Hungry ghoul» (CC0);
+- выстрелы и перезарядка: OpenGameArt — «Gunshots», «The Free Firearm Sound Library», «Gun reload sounds» (CC0);
+- шаги по траве, бетону, снегу, дереву, удары по металлу, двери, шорох одежды: Kenney «Impact Sounds» и «RPG Audio» (CC0); шаги по гравию — «Fantozzi's Footsteps» (CC0), по металлу — «Footsteps Leather, Cloth, Armor» (CC0);
+- шипение тормозов, ветер, вороны, еда и питьё: OpenGameArt (CC0);
+- гул дизеля — «Engine Sound» (автор kurt), грохот колёс — «Background Rumble Noise» (автор gryc), OpenGameArt, CC-BY 3.0;
+- тифон — запись «Leslie S-3L», автор HarveyHenkelmann, Wikimedia Commons.
+
 ## Устройство
 
 - `index.html` — интерфейс пульта.

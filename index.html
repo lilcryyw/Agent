@@ -41,7 +41,9 @@ button.ghost { background: transparent; color: var(--dim); }
 #top { position: fixed; top: 0; left: 0; right: 0; display: flex; align-items: center; gap: 10px;
   padding: var(--st) var(--sr) 4px var(--sl); background: linear-gradient(#0d110fcc, #0d110f00); pointer-events: none; }
 #top > * { pointer-events: auto; }
-.stats { display: grid; grid-template-columns: repeat(4, auto); gap: 3px 10px; }
+.stats { display: grid; grid-template-columns: repeat(3, auto); gap: 2px 8px; }
+.st em { font-style: normal; font-family: var(--f-mono); font-size: 11px; min-width: 22px; color: var(--ink); }
+#sWater i u { background: #4aa8e8; } #sFood i u { background: #d8a040; }
 .st { display: flex; align-items: center; gap: 4px; font-size: 11px; }
 .st b { font-size: 12px; width: 16px; text-align: center; }
 .st i { display: block; width: 44px; height: 5px; background: #0a0c0bcc; border-radius: 3px; overflow: hidden; }
@@ -123,6 +125,13 @@ button.ghost { background: transparent; color: var(--dim); }
 #bFire.held { background: radial-gradient(#e85a40, #a02818); }
 #bWeapon2 { position: fixed; right: calc(var(--sr) + 100px); bottom: calc(var(--sb) + 20px); }
 #footHud #ctx, #cabHud ~ #ctx { }
+.moves { position: fixed; right: calc(var(--sr) + 100px); bottom: calc(var(--sb) + 64px); display: flex; gap: 6px; align-items: center; }
+.moves button { padding: 7px 10px; font-size: 12px; font-weight: 700; background: #1a211dd0; border-radius: 18px; }
+.moves button.on { background: var(--amber); color: #1c1a10; border-color: #b88c18; }
+#stam { position: absolute; left: 0; right: 0; top: -8px; height: 4px; background: #0a0c0bb0; border-radius: 2px; overflow: hidden; }
+#stam u { display: block; height: 100%; width: 100%; background: #9fe0a8; } #stam.low u { background: var(--red); }
+.ii { width: 100%; height: 100%; object-fit: contain; display: block; }
+.tile span { width: 46px; height: 46px; } .ic { width: 30px; height: 30px; display: block; } .det .big { width: 52px; height: 52px; display: block; }
 #joy { position: fixed; width: 110px; height: 110px; margin: -55px 0 0 -55px; border-radius: 50%; border: 2px solid #ffffff40; background: #0d110f40; pointer-events: none; }
 #joy i { position: absolute; left: 35px; top: 35px; width: 40px; height: 40px; border-radius: 50%; background: #ebe2c8b0; }
 .joyhint { position: fixed; left: calc(var(--sl) + 30px); bottom: calc(var(--sb) + 30px); width: 90px; height: 90px; border-radius: 50%; border: 2px dashed #ffffff30; display: grid; place-items: center; font-size: 10px; color: #ffffff60; pointer-events: none; text-align: center; }
@@ -234,8 +243,9 @@ h3 { margin: 12px 0 4px; font-size: 11px; letter-spacing: .14em; color: var(--am
 <div id="hud" hidden>
   <div id="top">
     <div class="stats">
-      <div class="st" id="sHp" title="Здоровье"><b>❤️</b><i><u></u></i></div>
-      <div class="st" id="sFood" title="Сытость"><b>🍞</b><i><u></u></i></div>
+      <div class="st big" id="sHp" title="Здоровье"><b>❤️</b><i><u></u></i><em>100</em></div>
+      <div class="st big" id="sFood" title="Сытость"><b>🍖</b><i><u></u></i><em>100</em></div>
+      <div class="st big" id="sWater" title="Вода"><b>💧</b><i><u></u></i><em>100</em></div>
       <div class="st" id="sFuel" title="Топливо"><b>⛽</b><i><u></u></i></div>
       <div class="st" id="sDur" title="Прочность поезда"><b>🛡️</b><i><u></u></i></div>
     </div>
@@ -266,6 +276,7 @@ h3 { margin: 12px 0 4px; font-size: 11px; letter-spacing: .14em; color: var(--am
     <div class="joyhint">идти</div>
     <button class="wpn" id="bWeapon2">ПМ<small>0</small></button>
     <button id="bFire">ОГОНЬ</button>
+    <div class="moves"><button id="bCrouch" data-act="crouch">ПРИСЕСТЬ</button><button id="bRun" data-act="run">БЕГ</button><div id="stam"><u></u></div></div>
   </div>
   <div id="ctx"></div>
   <div id="joy" hidden><i></i></div>

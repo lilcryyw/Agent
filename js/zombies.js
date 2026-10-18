@@ -31,7 +31,7 @@ export class Zombies {
     return wpick(r, list);
   }
 
-  spawn(type, x, z, km, r) {
+  spawn(type, x, z, km, r, home) {
     if (this.list.length >= MAXZ) {
       const i = this.list.findIndex((q) => q.state === 'dead');
       if (i < 0) return null; this.remove(i);
@@ -43,6 +43,7 @@ export class Zombies {
     const hpMul = 1 + km / 120;
     const zb = { type, t, h: ch, hp: t.hp * hpMul, max: t.hp * hpMul, sp: R(r, t.sp[0], t.sp[1]), phase: r() * 6, state: 'walk',
       atk: 0, groan: 2 + r() * 8, screamed: false, vel: null, deadT: 0, off: 0, side: 1, size: t.sc ? t.sc[1] : 1, lod: 0 };
+    zb.home = home || { x, z }; zb.alert = 0;
     ch.mixer.setTime(r() * 2);
     this.list.push(zb);
     return zb;
@@ -50,6 +51,7 @@ export class Zombies {
 
   hit(z, dmg, head) {
     if (z.state === 'dead' || z.state === 'fly') return false;
+    z.hunt = true;
     z.hp -= dmg * (head ? 2.2 : 1);
     z.flinch = 0.25;
     if (z.hp <= 0) { this.kill(z); return true; }
@@ -84,7 +86,7 @@ export class Zombies {
       if (zs < sR - 130 || zs > sF + 450 || Math.abs(zd) > 280) { this.remove(i); continue; }
       const camD = Math.hypot(p.x - c.cam.x, p.z - c.cam.z);
       z.groan -= dt;
-      if (z.groan <= 0) { z.groan = 4 + Math.random() * 9; if (camD < 45) c.sound('groan', z, camD); }
+      if (z.groan <= 0) { z.groan = 4 + Math.random() * 9; if (camD < 50) c.sound('groan', z, camD); }
       let anim = 'walk', speed = z.sp, swing = false;
 
       if (z.state === 'attack') {
@@ -93,7 +95,7 @@ export class Zombies {
           if (!P.onGround) { z.state = 'walk'; z.onPlayer = false; }
           else {
             anim = 'idle'; swing = true; z.atk -= dt;
-            if (z.atk <= 0) { z.atk = 1.15; c.hurtPlayer(z.t.dmg, true, z); }
+            if (z.atk <= 0) { z.atk = 1.15; c.sound('attack', z, camD); c.hurtPlayer(z.t.dmg, true, z); }
             face(z, P.pos.x - p.x, P.pos.z - p.z);
             if (Math.hypot(P.pos.x - p.x, P.pos.z - p.z) > 1.5) { z.state = 'walk'; z.onPlayer = false; }
           }
@@ -104,7 +106,7 @@ export class Zombies {
           anim = 'idle'; swing = true; z.atk -= dt;
           if (z.atk <= 0) {
             z.atk = 1;
-            c.hurtTrain(z.t.tdmg * (tr.up.armor ? 0.5 : 1));
+            c.hurtTrain(z.t.tdmg * (tr.up.armor ? 0.5 : 1)); if (Math.random() < 0.6) c.sound('bang', z, camD);
             if (z.off > -8 && P.mode === 'cab') c.hurtPlayer(z.t.dmg * 0.45, false, z);
           }
           if (Math.abs(v) > 6 && Math.random() < dt * (Math.abs(v) > 12 ? 0.9 : 0.35)) {
@@ -116,17 +118,35 @@ export class Zombies {
         }
       } else {
         // цель: игрок на земле рядом, иначе поезд
-        let tx, tz, toPlayer = false;
-        if (P.onGround && Math.hypot(P.pos.x - p.x, P.pos.z - p.z) < 60) { tx = P.pos.x; tz = P.pos.z; toPlayer = true; }
-        else if (zs > sF + 2 && zs < sF + 180) { worldPos(zs - 3, clamp(zd, -0.4, 0.4), 0, _v); tx = _v.x; tz = _v.z; }
-        else { const ts = clamp(zs, sR + 1, sF - 1); worldPos(ts, Math.sign(zd || 1) * 1.9, 0, _v); tx = _v.x; tz = _v.z; }
+        let tx, tz, toPlayer = false, wander = false;
+        const pd = P.onGround || P.mode === 'roof' ? Math.hypot(P.pos.x - p.x, P.pos.z - p.z) : 1e9;
+        const detect = P.crouch ? 13 : P.running ? 70 : 38;
+        const dS = zs > sF ? zs - sF : zs < sR ? sR - zs : 0, trainD = Math.hypot(dS, Math.abs(zd));
+        if (P.onGround && (pd < detect || (z.hunt && pd < 90) || (z.alert > 0 && pd < 130))) {
+          if (!z.hunt) { z.hunt = true; c.sound('notice', z, camD); }
+          tx = P.pos.x; tz = P.pos.z; toPlayer = true;
+        } else if (z.alert > 0 || trainD < c.trainNoise || z.hunt) {
+          if (zs > sF + 2 && zs < sF + 180) { worldPos(zs - 3, clamp(zd, -0.4, 0.4), 0, _v); tx = _v.x; tz = _v.z; }
+          else { const ts = clamp(zs, sR + 1, sF - 1); worldPos(ts, Math.sign(zd || 1) * 1.9, 0, _v); tx = _v.x; tz = _v.z; }
+        } else {
+          // ещё не заметили: бродят у своего дома
+          wander = true;
+          if (!z.wp || Math.hypot(z.wp.x - p.x, z.wp.z - p.z) < 0.8) { const h = z.home || p; z.wp = { x: h.x + (Math.random() - 0.5) * 16, z: h.z + (Math.random() - 0.5) * 16 }; z.wait = Math.random() * 4; }
+          tx = z.wp.x; tz = z.wp.z;
+        }
+        if (z.alert > 0) z.alert -= dt;
         const dx = tx - p.x, dz = tz - p.z, dist = Math.hypot(dx, dz);
-        if (z.type === 'screamer' && !z.screamed && camD < 40) { z.screamed = true; c.scream(z); }
-        if (dist > 0.6) {
-          const st = Math.min(dist, z.sp * dt * (z.flinch > 0 ? 0.3 : 1));
+        if (z.type === 'screamer' && !z.screamed && toPlayer && pd < 30) { z.screamed = true; c.scream(z); }
+        if (wander && z.wait > 0) { z.wait -= dt; anim = 'idle'; }
+        else if (dist > 0.6) {
+          const st = Math.min(dist, z.sp * dt * (z.flinch > 0 ? 0.3 : 1) * (wander ? 0.45 : 1));
+          speed = z.sp * (wander ? 0.45 : 1);
+          // шаги рядом слышны
+          z.stepAcc = (z.stepAcc || 0) + st;
+          if (z.stepAcc > (z.t.run && !wander ? 1.3 : 0.75)) { z.stepAcc = 0; if (camD < 26) c.sound('step', z, camD); }
           p.x += dx / dist * st; p.z += dz / dist * st;
           face(z, dx, dz);
-          anim = z.t.run ? 'run' : 'walk';
+          anim = z.t.run && !wander ? 'run' : 'walk';
         } else anim = 'idle';
         p.y = c.groundH(zs, zd);
         if (toPlayer && dist < 1.15) { z.state = 'attack'; z.onPlayer = true; z.atk = 0.4; }
@@ -169,6 +189,8 @@ export class Zombies {
       const hd = ch.bones.Head; if (hd) { hd.rotation.z += Math.sin(z.phase * 0.3) * 0.25; hd.rotation.x += 0.2; }
     }
   }
+  // шум (выстрел, гудок) поднимает всех вокруг
+  alarm(x, z, radius) { for (const q of this.list) if (q.state !== 'dead' && Math.hypot(q.h.root.position.x - x, q.h.root.position.z - z) < radius) q.alert = 12; }
   remove(i) {
     const z = this.list[i];
     this.scene.remove(z.h.root);

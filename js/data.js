@@ -4,16 +4,21 @@
 export const ITEMS = {
   // еда
   tushenka:  { n: 'Тушёнка', c: 'food', w: 0.5, v: 12, food: 25 },
-  sgush:     { n: 'Сгущёнка', c: 'food', w: 0.4, v: 14, food: 20 },
+  sgush:     { n: 'Сгущёнка', c: 'food', w: 0.4, v: 14, food: 20, water: -3 },
   suhari:    { n: 'Сухари', c: 'food', w: 0.3, v: 5, food: 10 },
   grechka:   { n: 'Гречка 1 кг', c: 'food', w: 1, v: 10, food: 30 },
-  kilka:     { n: 'Килька в томате', c: 'food', w: 0.3, v: 8, food: 14 },
+  kilka:     { n: 'Килька в томате', c: 'food', w: 0.3, v: 8, food: 14, water: -4 },
   lapsha:    { n: 'Лапша быстрого приготовления', c: 'food', w: 0.1, v: 4, food: 9 },
   kartoshka: { n: 'Мешок картошки', c: 'food', w: 10, v: 32, food: 110 },
   varenye:   { n: 'Варенье бабушкино', c: 'food', w: 0.8, v: 16, food: 18 },
   med_honey: { n: 'Мёд, банка', c: 'food', w: 1, v: 26, food: 30 },
-  salo:      { n: 'Сало', c: 'food', w: 0.6, v: 15, food: 28 },
-  voda:      { n: 'Вода 5 л', c: 'food', w: 5, v: 8, food: 8 },
+  salo:      { n: 'Сало', c: 'food', w: 0.6, v: 15, food: 28, water: -6 },
+  voda:      { n: 'Вода 5 л', c: 'drink', w: 5, v: 10, water: 60 },
+  kvas:      { n: 'Квас, бутылка', c: 'drink', w: 1.2, v: 9, water: 30, food: 4 },
+  kompot:    { n: 'Компот, банка', c: 'drink', w: 3, v: 14, water: 45, food: 6 },
+  sok:       { n: 'Сок яблочный', c: 'drink', w: 1, v: 10, water: 25, food: 5 },
+  limonad:   { n: 'Лимонад «Буратино»', c: 'drink', w: 0.6, v: 8, water: 20 },
+  mineralka: { n: 'Минеральная вода', c: 'drink', w: 0.6, v: 7, water: 25 },
   syhpay:    { n: 'Армейский сухпаёк', c: 'food', w: 1.2, v: 30, food: 60 },
   griby:     { n: 'Солёные грибы', c: 'food', w: 0.7, v: 12, food: 15 },
   // медицина
@@ -41,7 +46,7 @@ export const ITEMS = {
   ak:        { n: 'АК-74', c: 'weapon', w: 3.6, v: 480, weapon: true },
   svd:       { n: 'СВД', c: 'weapon', w: 4.3, v: 650, weapon: true },
   // товары и ценности (не бытовое — держит экономику живой)
-  vodka:     { n: 'Водка', c: 'goods', w: 0.6, v: 18 },
+  vodka:     { n: 'Водка', c: 'goods', w: 0.6, v: 18, water: 5, hp: -3 },
   sigarety:  { n: 'Блок сигарет', c: 'goods', w: 0.2, v: 22 },
   spichki:   { n: 'Спички', c: 'goods', w: 0.05, v: 3 },
   svechi:    { n: 'Свечи', c: 'goods', w: 0.3, v: 5 },
@@ -76,7 +81,7 @@ export const ITEMS = {
 };
 
 export const CAT_NAMES = {
-  food: 'Еда', med: 'Медицина', fuel: 'Топливо', part: 'Запчасти',
+  food: 'Еда', drink: 'Питьё', med: 'Медицина', fuel: 'Топливо', part: 'Запчасти',
   weapon: 'Оружие', goods: 'Товары', valuable: 'Ценности', unique: 'Находки',
 };
 
@@ -97,39 +102,39 @@ export const AMMO = {
 
 const L = (rolls, t) => ({ rolls, t });
 export const LOOT = {
-  house: L([2, 4], [['tushenka', 3], ['grechka', 3], ['kilka', 2], ['varenye', 3], ['kartoshka', 1], ['voda', 3], ['salo', 2], ['griby', 2],
+  house: L([2, 4], [['tushenka', 3], ['grechka', 3], ['kilka', 2], ['varenye', 3], ['kartoshka', 1], ['voda', 3], ['kompot', 2], ['kvas', 1], ['salo', 2], ['griby', 2],
     ['bint', 2], ['zelenka', 1], ['spichki', 2], ['svechi', 2], ['vodka', 2], ['sigarety', 1], ['ikona', 0.5], ['samovar', 0.4],
     ['garmon', 0.25], ['balalayka', 0.25], ['chasy', 0.5], ['radio', 0.4], ['kniga', 1], ['plastinka', 0.5], ['valenki', 1], ['ushanka', 0.8],
     ['matreshka', 0.6], ['monety', 0.6], ['medal', 0.3], ['money', 2], ['am_p12', 0.6], ['toz', 0.12], ['sol', 1], ['sahar', 1], ['UNIQUE', 0.9]]),
-  dacha: L([1, 3], [['semena', 3], ['varenye', 3], ['kartoshka', 1.5], ['griby', 2], ['instrument', 1], ['kanistra', 0.7], ['benzopila', 0.25],
+  dacha: L([1, 3], [['semena', 3], ['varenye', 3], ['kompot', 3], ['kartoshka', 1.5], ['griby', 2], ['instrument', 1], ['kanistra', 0.7], ['benzopila', 0.25],
     ['vodka', 1], ['spichki', 1], ['shahmaty', 0.5], ['kassetnik', 0.4], ['UNIQUE', 0.6], ['med_honey', 1]]),
-  apartment: L([3, 6], [['tushenka', 3], ['lapsha', 4], ['sgush', 2], ['kilka', 2], ['voda', 3], ['suhari', 2], ['bint', 2], ['obezbol', 1.5],
+  apartment: L([3, 6], [['tushenka', 3], ['lapsha', 4], ['sgush', 2], ['kilka', 2], ['voda', 3], ['sok', 2], ['mineralka', 2], ['limonad', 1.5], ['suhari', 2], ['bint', 2], ['obezbol', 1.5],
     ['aptechka', 0.5], ['antibio', 0.4], ['vodka', 2], ['sigarety', 2], ['batareyki', 1.5], ['fonar', 1], ['kassetnik', 0.6], ['zenit', 0.4],
     ['zoloto', 0.25], ['chasy', 0.5], ['hohloma', 0.5], ['globus', 0.2], ['money', 3], ['am_p9', 0.5], ['pm', 0.1], ['UNIQUE', 1]]),
-  shop_food: L([3, 6], [['tushenka', 5], ['sgush', 4], ['lapsha', 5], ['kilka', 4], ['grechka', 3], ['voda', 5], ['suhari', 4],
+  shop_food: L([3, 6], [['tushenka', 5], ['sgush', 4], ['lapsha', 5], ['kilka', 4], ['grechka', 3], ['voda', 5], ['kvas', 3], ['sok', 3], ['limonad', 3], ['mineralka', 3], ['suhari', 4],
     ['vodka', 2], ['sigarety', 2], ['sol', 1], ['sahar', 2], ['money', 2], ['spichki', 1]]),
   shop_med: L([3, 5], [['bint', 5], ['zelenka', 3], ['aptechka', 2], ['antibio', 2], ['obezbol', 3], ['spirt', 2], ['x7', 0.08], ['money', 1]]),
   shop_hoz: L([2, 5], [['instrument', 3], ['spichki', 3], ['svechi', 3], ['batareyki', 3], ['kabel', 2], ['fonar', 2], ['kanistra', 1], ['benzopila', 0.5], ['generator', 0.2]]),
   shop_auto: L([2, 4], [['zapchasti', 4], ['maslo', 3], ['akkum', 2], ['kanistra', 2], ['instrument', 1.5], ['money', 1]]),
   shop_hunt: L([2, 4], [['am_p12', 5], ['toz', 1], ['am_p762', 1.5], ['svd', 0.15], ['binokl', 2], ['fonar', 2], ['syhpay', 1], ['protivogaz', 1]]),
-  kiosk: L([1, 3], [['sigarety', 4], ['vodka', 3], ['lapsha', 3], ['voda', 2], ['batareyki', 1], ['spichki', 1], ['money', 2]]),
+  kiosk: L([1, 3], [['sigarety', 4], ['vodka', 3], ['lapsha', 3], ['voda', 2], ['limonad', 3], ['kvas', 2], ['batareyki', 1], ['spichki', 1], ['money', 2]]),
   garage: L([1, 4], [['kanistra', 3], ['zapchasti', 2], ['instrument', 1.5], ['akkum', 1], ['maslo', 1.5], ['vodka', 1.5], ['kartoshka', 1], ['varenye', 1], ['list', 1], ['UNIQUE', 0.4]]),
   factory: L([2, 5], [['zapchasti', 3], ['list', 3], ['kabel', 2], ['instrument', 2], ['kanistra', 1.5], ['maslo', 2], ['bochka', 0.3], ['money', 1]]),
-  station: L([2, 4], [['kanistra', 2.5], ['bochka', 0.6], ['zapchasti', 2], ['fonar', 1], ['syhpay', 1], ['money', 2], ['voda', 1], ['UNIQUE', 1.2], ['am_p9', 0.6]]),
+  station: L([2, 4], [['kanistra', 2.5], ['bochka', 0.6], ['zapchasti', 2], ['fonar', 1], ['syhpay', 1], ['money', 2], ['voda', 2], ['mineralka', 1], ['UNIQUE', 1.2], ['am_p9', 0.6]]),
   church: L([1, 3], [['svechi', 4], ['ikona', 2], ['med_honey', 1.5], ['voda', 1], ['suhari', 1], ['kniga', 1], ['UNIQUE', 2]]),
   police: L([2, 4], [['am_p9', 4], ['pm', 1.5], ['am_p545', 2], ['ak', 0.35], ['aptechka', 1], ['bint', 1], ['syhpay', 1], ['money', 2], ['protivogaz', 1]]),
   hospital: L([2, 5], [['aptechka', 3], ['bint', 4], ['antibio', 3], ['obezbol', 2], ['spirt', 2], ['x7', 0.2]]),
   school: L([1, 3], [['suhari', 2], ['kniga', 3], ['globus', 1], ['syhpay', 0.5], ['batareyki', 1], ['shahmaty', 1], ['UNIQUE', 1]]),
   azs: L([2, 4], [['kanistra', 4], ['bochka', 1.2], ['maslo', 2], ['lapsha', 1], ['voda', 1], ['sigarety', 1], ['money', 1.5], ['akkum', 1]]),
-  military: L([3, 6], [['am_p545', 5], ['am_p762', 3], ['ak', 1.2], ['svd', 0.4], ['bizon', 0.5], ['syhpay', 4], ['aptechka', 2], ['protivogaz', 2], ['binokl', 1], ['bochka', 0.8]]),
-  car: L([1, 2], [['kanistra', 1.5], ['voda', 1], ['lapsha', 1], ['sigarety', 1], ['money', 1.5], ['aptechka', 0.5], ['instrument', 0.5], ['UNIQUE', 0.3]]),
+  military: L([3, 6], [['am_p545', 5], ['am_p762', 3], ['ak', 1.2], ['svd', 0.4], ['bizon', 0.5], ['syhpay', 4], ['voda', 2], ['aptechka', 2], ['protivogaz', 2], ['binokl', 1], ['bochka', 0.8]]),
+  car: L([1, 2], [['kanistra', 1.5], ['voda', 1], ['limonad', 1], ['lapsha', 1], ['sigarety', 1], ['money', 1.5], ['aptechka', 0.5], ['instrument', 0.5], ['UNIQUE', 0.3]]),
   ruins: L([0, 2], [['spichki', 1], ['svechi', 1], ['list', 1], ['monety', 0.4], ['UNIQUE', 0.3], ['money', 0.5]]),
 };
 
 // Груз брошенного вагона: один вид, но много
 export const WAGON_CARGO = [
   ['tushenka', 8, 24], ['kartoshka', 2, 6], ['zapchasti', 3, 8], ['vodka', 6, 16], ['list', 3, 7], ['sahar', 6, 14],
-  ['sol', 6, 14], ['sgush', 8, 20], ['kanistra', 3, 8], ['syhpay', 3, 9], ['kabel', 2, 6], ['semena', 4, 10],
+  ['sol', 6, 14], ['sgush', 8, 20], ['mineralka', 10, 24], ['kvas', 8, 20], ['kanistra', 3, 8], ['syhpay', 3, 9], ['kabel', 2, 6], ['semena', 4, 10],
 ];
 
 export const LOOT_TIME = {
@@ -210,6 +215,7 @@ export const ICONS = {
 };
 export function itemDesc(id) {
   const it = ITEMS[id]; if (!it) return '';
+  if (it.water) return [it.food ? `Сытость +${it.food}` : '', it.water > 0 ? `Жажда −${it.water}` : `Жажда +${-it.water}`].filter(Boolean).join(', ');
   if (it.food) return `Сытость +${it.food}`;
   if (it.cure) return `Лечит укус, здоровье +${it.hp}`;
   if (it.hp) return `Здоровье +${it.hp}`;
