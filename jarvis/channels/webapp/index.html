@@ -147,6 +147,7 @@ async function ask(text) {
   const wait = add("…");
   try {
     const r = await (await api("ask", JSON.stringify({ text }), "application/json")).json();
+    if (!r.reply) { wait.remove(); return; }  // Джарвис решил промолчать
     wait.textContent = ""; fill(wait, r.reply); say(r.reply);
   } catch (e) { wait.textContent = "Нет связи: " + e.message; }
 }

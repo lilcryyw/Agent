@@ -165,6 +165,8 @@ async def run(j: Jarvis | None = None, *, token: str | None = None, standalone: 
         return "Остановил." if stopped else "Хорошо, ничего не делаю."
 
     async def reply(msg: Message, text: str) -> None:
+        if not (text or "").strip():
+            return  # Джарвис решил промолчать
         for part in split_message(readable(text)):
             await msg.answer(part)
 

@@ -175,7 +175,7 @@ def test_history_survives_cutoff_refusal_and_empty_answers():
     brain, mem, clock, client = setup(script)
     assert brain.handle("owner", "Вопрос один").text == "Готов ответ."
     assert "не могу" in brain.handle("owner", "Вопрос два").text
-    assert brain.handle("owner", "Вопрос три").text == "Готово."
+    assert brain.handle("owner", "Вопрос три").silent  # пустой ответ — это молчание, а не «Готово.»
     assert brain.handle("owner", "Вопрос четыре").text == "Ок"
     assert_history_valid(brain.sessions["owner"].messages)
 
@@ -217,3 +217,19 @@ def test_cancel_stops_tool_loop():
     r = brain.handle("owner", "Найди всё", cancel=ev)
     assert "остановил" in r.text and len(client.calls) == 1
     assert_history_valid(brain.sessions["owner"].messages)
+
+
+def test_jarvis_can_stay_silent_and_remembers_why():
+    """«Сейчас скажу, а ты молчи» → тишина; договорённость живёт во внутреннем состоянии."""
+    def script(call):
+        last = str(call["messages"][-1])
+        if "молчи" in last:
+            return response([text_block("⟦молчу⟧\n⟦внутри: просил помолчать, пока не позовёт; слушаю⟧\n⟦исп: —⟧")])
+        assert "просил помолчать" in last  # видит своё состояние в следующей реплике
+        return response([text_block("⟦молчу⟧ ⟦внутри: всё ещё молчу — меня не звали⟧")])
+
+    brain, mem, clock, client = setup(script)
+    r = brain.handle("owner", "Сейчас я кое-что скажу, а ты молчи")
+    assert r.silent and r.text == ""
+    r = brain.handle("owner", "Раз, два, три")
+    assert r.silent and "меня не звали" in brain.inner_state("owner")

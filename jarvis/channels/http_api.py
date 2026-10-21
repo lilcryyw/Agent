@@ -145,7 +145,7 @@ class Api:
                         if stopped := api._stop(person, text):
                             return self._json(200, {"reply": stopped})
                         r = api.j.brain.handle(person, text, channel="api", device=device)
-                        return self._json(200, {"reply": r.text})
+                        return self._json(200, {"reply": r.text, "silent": bool(getattr(r, "silent", False))})
                     if u.path == "/api/voice":
                         if api.voice is None:
                             return self._json(501, {"error": "голос не настроен на сервере"})

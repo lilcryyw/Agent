@@ -75,6 +75,15 @@ def human_now(dt: datetime) -> str:
     return f"{WEEKDAYS[dt.weekday()]}, {dt.day} {MONTHS_GEN[dt.month - 1]} {dt.year}, {dt:%H:%M}"
 
 
+INNER_RE = re.compile(r"⟦\s*внутри\s*:([^⟧]*)⟧")
+
+
+def split_inner(text: str) -> tuple[str, str | None]:
+    """Отделить внутреннюю заметку ⟦внутри: …⟧ (что думаю, чувствую, чего жду) — её человек не видит."""
+    notes = [m.group(1).strip() for m in INNER_RE.finditer(text)]
+    return INNER_RE.sub("", text).strip(), (notes[-1] if notes else None)
+
+
 def split_used(text: str) -> tuple[str, list[str]]:
     """Отделить служебную строку ⟦исп: …⟧ от ответа."""
     refs: list[str] = []
@@ -190,6 +199,15 @@ class Brain:
             return self._turn(person_id, reason, origin="internal", channel=channel, device=device,
                               on_text=on_text, cancel=cancel, effort=effort)
 
+    def inner_state(self, person_id: str) -> str:
+        row = self.memory.ctx.db.one("SELECT value FROM meta WHERE key=?", (f"inner:{person_id}",))
+        return row["value"] if row else ""
+
+    def set_inner_state(self, person_id: str, text: str) -> None:
+        self.memory.ctx.db.execute(
+            "INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (f"inner:{person_id}", text[:600]))
+
     def _over_budget(self) -> bool:
         now = self.memory.local_now(self.s.owner_id) if self.memory.person(self.s.owner_id) else datetime.now()
         month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp()
@@ -280,6 +298,9 @@ class Brain:
                 state += " Ждут подтверждения человека (note approve/reject): " + "; ".join(pending) + "."
         if note:
             state += f" {note}"
+        inner = self.inner_state(person_id)
+        if inner:  # непрерывность разума: что я думал и чего ждал в прошлый раз
+            state += f"\n<моё_состояние>{inner}</моё_состояние>"
         blocks.append({"type": "text", "text": f"<контекст>Сейчас: {human_now(now)} ({now.tzinfo}). {where} {state}"
                                               f"</контекст>\n<память>\n{wm.render()}\n</память>"})
         blocks.append({"type": "text", "text": text if origin == "user"
@@ -415,12 +436,15 @@ class Brain:
             final_text = final_text or "Я сделал много шагов и ещё не закончил. Продолжать?"
             close_with(final_text)
 
+        final_text, inner_note = split_inner(final_text)
+        if inner_note:
+            self.set_inner_state(person_id, inner_note)
         clean, used = split_used(final_text)
         # «Использовал» засчитываем и за показанное в прошлых репликах этой сессии.
         mem.feedback(list(dict.fromkeys(shown_now + [u for u in used if u in sess.shown])), used)
-        silent = origin == "internal" and (not clean or SILENCE in clean)
-        if silent:
+        silent = not clean or SILENCE in clean and not clean.replace(SILENCE, "").strip()
+        if silent:  # решил промолчать (в том числе в ответ на «помолчи») — это действие, а не сбой
             return TurnResult("", used, shown_now, tool_calls, turn_cost, total, new_session, True)
-        clean = clean.replace(SILENCE, "").strip() or "Готово."
+        clean = clean.replace(SILENCE, "").strip()
         mem.observe(Observation(person_id, clean, speaker="assistant", channel=channel, device=device))
         return TurnResult(clean, used, shown_now, tool_calls, turn_cost, total, new_session)
