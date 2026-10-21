@@ -44,7 +44,7 @@ set -euxo pipefail
 command -v docker || curl -fsSL https://get.docker.com | sh
 # Память под модели речи и смысла: если ОЗУ мало — файл подкачки 4 ГБ.
 if [ "$(free -g | awk '/Mem:/{{print $2}}')" -lt 8 ] && [ ! -f /swapfile ]; then
-  fallocate -l 4G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+  fallocate -l 3G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
   echo '/swapfile none swap sw 0 0' >> /etc/fstab
 fi
 # Код — из приватного хранилища Hugging Face (репозиторий на GitHub закрытый).
@@ -65,8 +65,8 @@ echo "Джарвис запущен: https://$DOMAIN"
 
 def main() -> None:
     env = read_env(ROOT / ".env")
-    # Недорогой VPS (1–2 ГБ): смысл — Cloudflare Workers AI, распознавание — сжатая GigaAM, голос — Piper.
-    env.update(JARVIS_EMBED_MODEL="@cf/baai/bge-m3", JARVIS_STT_QUANT="int8", JARVIS_OWNER_NAME=env.get("JARVIS_OWNER_NAME", ""))
+    # VPS на 2 ГБ: распознавание — полная GigaAM, голос — Piper (на сервере); смысл — Cloudflare (e5-large в 2 ГБ не помещается).
+    env.update(JARVIS_EMBED_MODEL="@cf/baai/bge-m3", JARVIS_OWNER_NAME=env.get("JARVIS_OWNER_NAME", ""))
     env.update({k: v for k, v in read_env(ROOT / "deploy" / "cloudflare" / ".secrets").items() if k.startswith("CLOUDFLARE_")})
     # Ключ владельца для веб-приложения (без Telegram) и резервная копия памяти в приватный датасет Hugging Face.
     saved = read_env(ROOT / "deploy" / "hf" / ".secrets") if (ROOT / "deploy" / "hf" / ".secrets").exists() else {}
