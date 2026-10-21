@@ -31,6 +31,9 @@ Notifier = Callable[[str, str], None]  # (person_id, текст)
 
 
 def _valid_tz(tz: str) -> str:
+    aliases = {"москва": "Europe/Moscow", "мск": "Europe/Moscow", "париж": "Europe/Paris", "paris": "Europe/Paris",
+               "самара": "Europe/Samara", "киев": "Europe/Kyiv", "минск": "Europe/Minsk"}
+    tz = aliases.get((tz or "").strip().lower(), (tz or "").strip())
     try:
         ZoneInfo(tz)
         return tz
@@ -61,8 +64,13 @@ class Jarvis:
                                                        effort=self.s.subconscious_effort, usage_sink=m.record_usage)
         m.encoder = EpisodeEncoder(m.ctx, m.llm, m.entities, m.facts, m.episodes, m.retriever)
         m.sleeper = Sleep(m.ctx, m.llm, m.facts, m.core, m.intentions)
+        self.s.owner_timezone = _valid_tz(self.s.owner_timezone)
         m.add_person(self.s.owner_id, self.s.owner_name, role="owner", timezone=self.s.owner_timezone)
         m.rename_person(self.s.owner_id, self.s.owner_name)  # имя в настройках поменялось — помним новое
+        for r in m.ctx.db.query("SELECT id, timezone FROM persons"):  # починить неверные пояса, записанные раньше
+            good = _valid_tz(r["timezone"])
+            if good != r["timezone"]:
+                m.ctx.db.execute("UPDATE persons SET timezone=? WHERE id=?", (good, r["id"]))
         for pid, (name, role, tz) in self.s.people.items():
             m.add_person(pid, name, role=role, timezone=_valid_tz(tz))
             m.rename_person(pid, name)

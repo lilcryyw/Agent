@@ -10,6 +10,7 @@ dependencies = [
     "pydantic>=2.6",
     "snowballstemmer>=2.2",
     "cryptography>=42",
+    "tzdata>=2024.1",  # часовые пояса и в «тонких» образах без системной базы
 ]
 
 [project.optional-dependencies]
