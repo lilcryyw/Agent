@@ -250,3 +250,46 @@ def test_call_jarvis_speaks_on_his_own(server, monkeypatch):
         srv._notify("owner", "Напоминаю: позвонить маме.")  # инициатива извне — звучит в звонке
         got, _ = recv_until(ws, "done", timeout=10)
         assert any(m["type"] == "say" and "маме" in m["text"] for m in got)
+
+
+def test_ambient_mode_listens_and_hints(server, monkeypatch):
+    """«Всегда слышу»: всё услышанное — в короткую память; внутренний голос решает подсказать; дословное живёт 30 мин."""
+    from websockets.sync.client import connect
+
+    from cogmem.llm import ScriptedLLM
+    from jarvis.channels import ambient
+
+    srv, token, seen = server
+    calls = []
+
+    def llm(schema, system, user):
+        calls.append(schema.__name__)
+        if schema.__name__ == "Gate":
+            return schema(act=True, reason="учитель спросил про столицу Франции — подсказать «Париж»")
+        return schema(worth=True, topic="География: столицы", summary="Столица Франции — Париж.")
+
+    srv.j.memory.llm = ScriptedLLM(llm)
+    remembered = []
+    srv.j.memory.remember = lambda person, text, **kw: remembered.append(text)
+
+    def stimulus(person, reason, **kw):
+        seen.append((person, reason, kw))
+        kw["on_text"]("Париж. ")
+        return SimpleNamespace(text="Париж.", silent=False)
+
+    srv.j.brain.handle_stimulus = stimulus
+    with connect(f"ws://127.0.0.1:{srv.port}", proxy=None) as ws:
+        ws.send(json.dumps({"type": "hello", "token": token, "mode": "ambient"}))
+        recv_until(ws, "done")
+        ws.send(json.dumps({"type": "played", "turn": 1}))
+        stream(ws, tone(1.0) + silence(1.2))  # «учитель» говорит (FakeVoice: «Какая завтра погода»)
+        got, _ = recv_until(ws, "done", timeout=15)
+        heard = [m for m in got if m["type"] == "heard"]
+        assert heard and heard[0]["ambient"] is True
+        assert any(m["type"] == "say" and "Париж" in m["text"] for m in got)  # подсказал сам
+        assert "Слышу вокруг" in seen[-1][1] and "Gate" in calls
+    lines = srv.j.memory.ctx.db.query("SELECT text FROM ambient_lines")
+    assert lines  # услышанное в короткой памяти
+    srv.j.memory.ctx.db.execute("UPDATE ambient_lines SET ts = ts - 31*60")
+    ambient.purge(srv.j.memory)
+    assert not srv.j.memory.ctx.db.query("SELECT 1 FROM ambient_lines")  # через 30 минут дословное стёрто

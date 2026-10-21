@@ -190,7 +190,8 @@ class CallServer:
             await ws.send(json.dumps({"type": "error", "text": "Голос на сервере не настроен"}, ensure_ascii=False))
             return
         device = re.sub(r"[^\w-]", "", str(hello.get("device") or "web"))[:24] or "web"
-        call = Call(self, ws, person, device)
+        mode = "ambient" if hello.get("mode") == "ambient" else "call"
+        call = Call(self, ws, person, device, mode=mode)
         log.info("звонок: %s (%s)", person, device)
         self.active.setdefault(person, set()).add(call)
         try:
@@ -201,7 +202,7 @@ class CallServer:
 
 
 class Call:
-    def __init__(self, server: CallServer, ws, person: str, device: str):
+    def __init__(self, server: CallServer, ws, person: str, device: str, mode: str = "call"):
         self.srv, self.ws, self.person, self.device = server, ws, person, device
         self.j, self.voice = server.j, server.voice
         self.seg = make_segmenter(server.models_dir)
@@ -221,6 +222,13 @@ class Call:
         self._quiet_since = 0.0        # когда Джарвис замолчал (хвост эха ещё может прийти)
         self._cancel = threading.Event()  # отмена текущего хода «сознания» (перебили)
         self._tasks: set[asyncio.Task] = set()
+        self.mode = mode                   # call — разговор; ambient — «всегда слышу» (урок, встреча)
+        self.amb = None
+        if mode == "ambient":
+            from jarvis.channels.ambient import Ambient
+
+            self.amb = Ambient(self.j, person)
+        self.extra_note: str | None = None
         self._turn_lock = asyncio.Lock()   # ход по реплике и ход по своей инициативе не пересекаются
         self._activity = time.time()       # последняя речь человека или конец речи Джарвиса
         self._proactive_n = 0              # сколько раз подряд Джарвис заговорил сам (сброс — когда говорит человек)
@@ -294,6 +302,8 @@ class Call:
             self._cancel.set()
             for w in workers + list(self._tasks):
                 w.cancel()
+            if self.amb is not None:  # конец «голосового режима» — тема в долгую память
+                self.loop.run_in_executor(None, lambda: self.amb.maybe_consolidate(force=True))
 
     def _audio(self, pcm: bytes) -> None:
         if self.muted:
@@ -369,6 +379,9 @@ class Call:
         echo_window = busy or time.time() - self._quiet_since < 4
         if echo_window and is_echo(heard, self.spoken):
             return
+        if self.amb is not None:
+            await self._ambient(heard, pcm, busy)
+            return
         await self.send({"type": "heard", "text": heard})
         if busy:
             await self.interrupt()
@@ -396,12 +409,54 @@ class Call:
             finally:
                 self.thinking = False
 
+    # --- голосовой режим «всегда слышу» ---
+    async def _ambient(self, heard: str, pcm: bytes, busy: bool) -> None:
+        from jarvis.channels.ambient import addressed
+
+        who = await self.loop.run_in_executor(None, self._who, pcm)
+        await self.send({"type": "heard", "text": heard, "who": who, "ambient": True})
+        if addressed(heard):  # «Джарвис, …» — разговор с ним, как обычно, но со знанием обстановки
+            if busy:
+                await self.interrupt()
+            self.amb.add(who, heard)
+            self.extra_note = self.amb.context()
+            self.texts.put_nowait(heard)
+            return
+        if busy and who == "я":
+            await self.interrupt()
+        self.amb.add(who, heard)
+        self._spawn(self._ambient_think())
+
+    def _who(self, pcm: bytes) -> str:
+        """Кто говорит: сам человек («я») или кто-то рядом — по голосу, если он записан."""
+        sp = getattr(self.j, "speakers", None)
+        if sp is None or not sp.profiles():
+            return "?"
+        try:
+            m = sp.identify(pcm)
+        except Exception:  # noqa: BLE001
+            return "?"
+        return "я" if m.person_id == self.person else "рядом"
+
+    async def _ambient_think(self) -> None:
+        if self.thinking:
+            return
+        reason = await self.loop.run_in_executor(None, self.amb.gate)
+        await self.loop.run_in_executor(None, self.amb.maybe_consolidate)
+        if not reason or self.thinking:
+            return
+        async with self._turn_lock:
+            self.extra_note = self.amb.context()
+            await self._turn(f"Внутренний голос: {reason}. Если человеку правда нужна подсказка — скажи её очень "
+                             "коротко и тихо, как шёпот в наушник (ответ, слово, напоминание). Иначе ⟦молчу⟧.",
+                             stimulus=True)
+
     # --- инициатива: Джарвис говорит, когда сам считает нужным ---
     async def _initiative(self) -> None:
         while True:
             await asyncio.sleep(2)
             try:
-                if self._proactive_n >= len(PROACTIVE_AFTER_S) or self.muted or self.thinking \
+                if self.amb is not None or self._proactive_n >= len(PROACTIVE_AFTER_S) or self.muted or self.thinking \
                         or self.playing is not None or not self.texts.empty() or self.seg.in_speech:
                     continue
                 if time.time() - self._activity < PROACTIVE_AFTER_S[self._proactive_n]:
@@ -462,6 +517,9 @@ class Call:
         self.thinking = True
         self._cancel = cancel = threading.Event()
         note, self.note = self.note, None
+        extra, self.extra_note = self.extra_note, None
+        if extra:
+            note = f"{note}\n{extra}" if note else extra
         await self.state("thinking")
         sentences: asyncio.Queue[str | None] = asyncio.Queue()
         splitter = SpeechSplitter()
@@ -473,7 +531,8 @@ class Call:
         def work():
             try:
                 if stimulus:
-                    return self.j.brain.handle_stimulus(self.person, text, channel="call", device=self.device,
+                    return self.j.brain.handle_stimulus(self.person, f"{text}\n{note}" if note else text,
+                                                        channel="call", device=self.device,
                                                         on_text=lambda chunk: put(splitter.feed(chunk)),
                                                         cancel=cancel, effort=self.srv.effort)
                 return self.j.brain.handle(self.person, text, channel="call", device=self.device, note=note,

@@ -287,6 +287,9 @@ class Jarvis:
     def pulse(self) -> None:
         """Один удар пульса: память, напоминания, сон по расписанию, инициатива."""
         m = self.memory
+        from jarvis.channels.ambient import purge
+
+        purge(m)  # дословно услышанное вокруг живёт не дольше 30 минут
         try:
             m.tick()
         except Exception:  # noqa: BLE001
