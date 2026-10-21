@@ -24,7 +24,11 @@ STT_BACKEND = os.environ.get("JARVIS_STT", "local")
 # piper — голос Джарвиса синтезирует сервер; client — сервер присылает текст, а говорит сам телефон/браузер
 # (для слабых бесплатных серверов, где синтез идёт медленнее речи).
 TTS_BACKEND = os.environ.get("JARVIS_TTS", "piper")
-TTS_VOICE = os.environ.get("JARVIS_TTS_VOICE", "ru_RU-dmitri-medium")  # ещё: ru_RU-irina-medium, -denis-, -ruslan-
+# Звучание «в стиле JARVIS»: чуть ниже тон, лёгкий металлический отзвук, ровная громкость (off — чистый голос).
+TTS_FX = os.environ.get("JARVIS_TTS_FX", "jarvis")
+FX = {"jarvis": "asetrate={sr}*0.93,aresample={sr},atempo=1.05,aecho=0.8:0.6:14:0.22,highpass=f=90,"
+                "lowpass=f=8500,acompressor=threshold=0.1:ratio=3"}
+TTS_VOICE = os.environ.get("JARVIS_TTS_VOICE", "ru_RU-denis-medium")  # ещё: ru_RU-irina-medium, -denis-, -ruslan-
 PIPER_BASE = "https://huggingface.co/rhasspy/piper-voices/resolve/main"
 
 
@@ -137,6 +141,11 @@ class Voice:
     def speak(self, text: str, fmt: str = "ogg") -> tuple[bytes, str]:
         """→ (аудио, mime). ogg/opus — для Telegram, mp3 — для iPhone и браузера, wav — как есть."""
         wav = self.speak_wav(text)
+        fx = FX.get(TTS_FX)
+        if fx:
+            with wave.open(io.BytesIO(wav)) as w:
+                sr = w.getframerate()
+            wav = ffmpeg(wav, ["-af", fx.format(sr=sr), "-f", "wav"])
         if fmt == "wav":
             return wav, "audio/wav"
         if fmt == "mp3":
