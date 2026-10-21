@@ -42,14 +42,15 @@ def build(env: dict[str, str], domain: str = "") -> str:
 exec > /var/log/jarvis-install.log 2>&1
 set -euxo pipefail
 command -v docker || curl -fsSL https://get.docker.com | sh
-command -v git || (apt-get update && apt-get install -y git)
 # Память под модели речи и смысла: если ОЗУ мало — файл подкачки 4 ГБ.
 if [ "$(free -g | awk '/Mem:/{{print $2}}')" -lt 8 ] && [ ! -f /swapfile ]; then
   fallocate -l 4G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
   echo '/swapfile none swap sw 0 0' >> /etc/fstab
 fi
-[ -d /opt/jarvis ] || git clone -b {BRANCH} {REPO} /opt/jarvis
-cd /opt/jarvis && git pull --ff-only || true
+# Код — из приватного хранилища Hugging Face (репозиторий на GitHub закрытый).
+mkdir -p /opt/jarvis && curl -fsSL -H "Authorization: Bearer {env.get('HF_TOKEN', '')}" \
+  "https://huggingface.co/datasets/{env.get('JARVIS_BACKUP_REPO', '')}/resolve/main/code.tar.gz" | tar xz -C /opt/jarvis
+cd /opt/jarvis
 IP=$(curl -fsS https://api.ipify.org || hostname -I | awk '{{print $1}}')
 DOMAIN={shlex.quote(domain) if domain else '"$(echo "$IP" | tr . -).sslip.io"'}
 umask 077
@@ -64,6 +65,9 @@ echo "Джарвис запущен: https://$DOMAIN"
 
 def main() -> None:
     env = read_env(ROOT / ".env")
+    # Недорогой VPS (1–2 ГБ): смысл — Cloudflare Workers AI, распознавание — сжатая GigaAM, голос — Piper.
+    env.update(JARVIS_EMBED_MODEL="@cf/baai/bge-m3", JARVIS_STT_QUANT="int8", JARVIS_OWNER_NAME=env.get("JARVIS_OWNER_NAME", ""))
+    env.update({k: v for k, v in read_env(ROOT / "deploy" / "cloudflare" / ".secrets").items() if k.startswith("CLOUDFLARE_")})
     # Ключ владельца для веб-приложения (без Telegram) и резервная копия памяти в приватный датасет Hugging Face.
     saved = read_env(ROOT / "deploy" / "hf" / ".secrets") if (ROOT / "deploy" / "hf" / ".secrets").exists() else {}
     env.setdefault("JARVIS_OWNER_TOKEN", saved.get("JARVIS_OWNER_TOKEN") or "jv_" + secrets.token_urlsafe(32))
