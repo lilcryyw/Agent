@@ -58,6 +58,8 @@ cat > .env <<'JARVIS_ENV'
 {lines}
 JARVIS_ENV
 echo "JARVIS_DOMAIN=$DOMAIN" >> .env
+# Памяти 6 ГБ и больше — полная модель смысла (e5-large) прямо на сервере, без Cloudflare.
+if [ "$(free -g | awk '/Mem:/{{print $2}}')" -ge 6 ]; then sed -i '/^JARVIS_EMBED_MODEL=/d' .env; fi
 cd deploy && docker compose --env-file ../.env up -d --build
 echo "Джарвис запущен: https://$DOMAIN"
 """
