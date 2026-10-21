@@ -218,3 +218,35 @@ def test_call_survives_tts_failure(server):
             assert "Завтра в Париже солнечно." in said  # текстом пришло, хоть и без звука
             ws.send(json.dumps({"type": "played", "turn": got[-1]["turn"]}))
         assert len(seen) == 2
+
+
+def test_call_jarvis_speaks_on_his_own(server, monkeypatch):
+    """Пауза в разговоре → внутренний голос решает заговорить → Джарвис говорит сам; напоминание звучит в звонке."""
+    from websockets.sync.client import connect
+
+    from cogmem.llm import ScriptedLLM
+    from cogmem.types import Observation
+
+    monkeypatch.setattr("jarvis.channels.call.PROACTIVE_AFTER_S", (1.0,))
+    srv, token, seen = server
+    mem = srv.j.memory
+    mem.llm = ScriptedLLM(lambda schema, system, user: schema(speak=True, why="продолжить мысль"))
+    mem.observe(Observation("owner", "Расскажи про план на завтра", speaker="user", channel="call"))
+
+    def stimulus(person, reason, **kw):
+        seen.append((person, "stimulus", kw))
+        kw["on_text"]("Кстати, завтра в девять у тебя встреча. ")
+        return SimpleNamespace(text="Кстати, завтра в девять у тебя встреча.", silent=False)
+
+    srv.j.brain.handle_stimulus = stimulus
+    with connect(f"ws://127.0.0.1:{srv.port}", proxy=None) as ws:
+        ws.send(json.dumps({"type": "hello", "token": token}))
+        recv_until(ws, "done")
+        ws.send(json.dumps({"type": "played", "turn": 1}))
+        got, _ = recv_until(ws, "done", timeout=15)  # человек молчит — Джарвис заговорил сам
+        assert any(m["type"] == "say" and "встреча" in m["text"] for m in got)
+        assert seen[-1][1] == "stimulus" and seen[-1][2]["channel"] == "call"
+        ws.send(json.dumps({"type": "played", "turn": got[-1]["turn"]}))
+        srv._notify("owner", "Напоминаю: позвонить маме.")  # инициатива извне — звучит в звонке
+        got, _ = recv_until(ws, "done", timeout=10)
+        assert any(m["type"] == "say" and "маме" in m["text"] for m in got)

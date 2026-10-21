@@ -49,19 +49,39 @@ def safe_name(name: str) -> str:
     return name[:80]
 
 
-async def run(j: Jarvis | None = None) -> None:
+STATUS: dict = {"running": False, "bot": "", "error": ""}  # для органа telegram (видно Джарвису)
+
+
+def _links(j) -> dict[int, str]:
+    db = j.memory.ctx.db
+    db.execute("CREATE TABLE IF NOT EXISTS telegram_links (tg_id INTEGER PRIMARY KEY, person_id TEXT NOT NULL)")
+    return {r["tg_id"]: r["person_id"] for r in db.query("SELECT tg_id, person_id FROM telegram_links")}
+
+
+async def run(j: Jarvis | None = None, *, token: str | None = None, standalone: bool = True) -> None:
+    import os
+
     from aiogram import Bot, Dispatcher, F
-    from aiogram.filters import Command
+    from aiogram.client.session.aiohttp import AiohttpSession
+    from aiogram.client.telegram import TelegramAPIServer
+    from aiogram.filters import Command, CommandStart
     from aiogram.types import BufferedInputFile, Message
 
     j = j or Jarvis()
-    if not j.s.telegram_token:
+    token = token or j.s.telegram_token
+    if not token:
         raise SystemExit("Нужен TELEGRAM_BOT_TOKEN")
-    if not j.s.telegram_users:
-        raise SystemExit("Нужен JARVIS_TELEGRAM_USERS (кто может говорить с Джарвисом)")
-    bot = Bot(j.s.telegram_token)
+    # Из России api.telegram.org бывает недоступен: можно указать прокси или свой адрес Bot API.
+    session = AiohttpSession(proxy=os.environ["TELEGRAM_PROXY"]) if os.environ.get("TELEGRAM_PROXY") else AiohttpSession()
+    if os.environ.get("TELEGRAM_API_BASE"):
+        session.api = TelegramAPIServer.from_base(os.environ["TELEGRAM_API_BASE"])
+    bot = Bot(token, session=session)
+    me = await bot.get_me()  # таймаут/ошибка здесь — значит Telegram недоступен с сервера
+    STATUS.update(running=True, bot=me.username or "", error="")
     dp = Dispatcher()
-    tg_of = {pid: tg for tg, pid in j.s.telegram_users.items()}
+    users = dict(j.s.telegram_users)
+    users.update(_links(j))
+    tg_of = {pid: tg for tg, pid in users.items()}
     loop = asyncio.get_running_loop()
 
     async def send_text(chat_id: int, text: str) -> None:
@@ -113,7 +133,25 @@ async def run(j: Jarvis | None = None) -> None:
     j.start_background()  # повторный вызов безопасен: шлюз и API запускаются один раз
 
     def person_of(msg: Message) -> str | None:
-        return j.s.telegram_users.get(msg.from_user.id) if msg.from_user else None
+        return users.get(msg.from_user.id) if msg.from_user else None
+
+    @dp.message(CommandStart())
+    async def start(msg: Message) -> None:
+        """Привязка: ссылка t.me/<бот>?start=<код> от Джарвиса → этот Telegram становится каналом человека."""
+        from jarvis.channels.http_api import person_for_token
+
+        code = (msg.text or "").split(maxsplit=1)[1].strip() if len((msg.text or "").split()) > 1 else ""
+        pid = person_for_token(j.memory, code) if code else None
+        if pid is None:
+            if person_of(msg):
+                await msg.answer("Я на связи. Пиши или присылай голосовые.")
+            return  # чужим — молчим
+        j.memory.ctx.db.execute("INSERT OR REPLACE INTO telegram_links(tg_id, person_id) VALUES (?,?)",
+                                (msg.from_user.id, pid))
+        users[msg.from_user.id] = pid
+        tg_of[pid] = msg.from_user.id
+        name = (j.memory.person(pid) or {}).get("name", "")
+        await msg.answer(f"Готово{', ' + name if name else ''}! Теперь пиши мне здесь или присылай голосовые.")
 
     def stop_reply(pid: str, text: str) -> str | None:
         """«Стоп» — сразу, без очереди к «сознанию»: прервать ход и фоновые задачи."""
@@ -262,9 +300,11 @@ async def run(j: Jarvis | None = None) -> None:
             await msg.answer("Не получилось принять файл, попробуй ещё раз.")
 
     try:
-        await dp.start_polling(bot)
+        await dp.start_polling(bot, handle_signals=standalone)
     finally:
-        j.stop()
+        STATUS["running"] = False
+        if standalone:
+            j.stop()
 
 
 def main() -> None:

@@ -181,10 +181,14 @@ class Brain:
             return self._turn(person_id, text, origin="user", channel=channel, device=device, note=note,
                               on_text=on_text, effort=effort, cancel=cancel)
 
-    def handle_stimulus(self, person_id: str, reason: str) -> TurnResult:
-        """Внутренний повод (цель, срок, событие): Джарвис сам решает, действовать ли и говорить ли."""
+    def handle_stimulus(self, person_id: str, reason: str, *, channel: str = "internal", device: str | None = None,
+                        on_text: Callable[[str], None] | None = None, cancel: threading.Event | None = None,
+                        effort: str | None = None) -> TurnResult:
+        """Внутренний повод (цель, срок, событие, пауза в разговоре): Джарвис сам решает, действовать ли
+        и говорить ли. channel="call" — повод внутри живого разговора (ответ звучит сразу)."""
         with self._lock(person_id):
-            return self._turn(person_id, reason, origin="internal", channel="internal", device=None)
+            return self._turn(person_id, reason, origin="internal", channel=channel, device=device,
+                              on_text=on_text, cancel=cancel, effort=effort)
 
     def _over_budget(self) -> bool:
         now = self.memory.local_now(self.s.owner_id) if self.memory.person(self.s.owner_id) else datetime.now()

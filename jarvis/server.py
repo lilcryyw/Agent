@@ -73,13 +73,8 @@ def main() -> None:
 
         signal.signal(signal.SIGTERM, on_term)
     try:
-        if j.s.telegram_token:
-            from jarvis.channels.telegram import run
-
-            asyncio.run(run(j))  # aiogram перехватывает SIGTERM сам — копию сохраняем в finally
-        else:
-            logging.info("Telegram не настроен — работают API, живой разговор и устройства")
-            threading.Event().wait()
+        # Telegram (если есть токен в .env или в сейфе) запускается в фоне из start_background.
+        threading.Event().wait()
     finally:
         if backup is not None:
             j.stop()

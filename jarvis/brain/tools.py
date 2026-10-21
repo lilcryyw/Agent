@@ -194,6 +194,11 @@ TOOLS: list[dict] = [
      "input_schema": _schema({"name": S})},
     {"name": "skill_search", "description": "Найти среди своих навыков подходящие для задачи.",
      "input_schema": _schema({"query": S})},
+    {"name": "telegram",
+     "description": "Подключить Telegram самому. op: status — работает ли; set_token — сохранить токен бота "
+                    "(value; токен даёт @BotFather, только по ясной просьбе человека); link — ссылка, по которой "
+                    "человек привяжет свой Telegram (value пусто). value — пустая строка, если не нужен.",
+     "input_schema": _schema({"op": {"type": "string", "enum": ["status", "set_token", "link"]}, "value": S})},
     {"name": "tell",
      "description": "Сказать человеку прямо сейчас (в его каналы; device — вслух на этом устройстве): ход "
                     "длинной работы, срочное, ответ на просьбу. person — кому (id или имя; себе/собеседнику — "
@@ -480,6 +485,16 @@ class ToolBox:
             return self._job(person, a)
         if name == "file":
             return self._file(person, a, origin)
+        if name == "telegram":
+            fn = getattr(self, "on_telegram", None)
+            if fn is None:
+                return "Telegram на этом сервере недоступен.", True
+            if a["op"] == "set_token":
+                st = self._state(person, origin)
+                if origin != "user" or st.tainted or st.unverified:
+                    return "Токен бота — только из реплики самого человека.", True
+            return fn(person, a["op"], a.get("value") or ""), False
+
         if name == "tell":
             return self._tell(person, a, origin)
         return f"Нет такого органа: {name}", True

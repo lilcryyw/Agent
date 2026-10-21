@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -95,6 +97,7 @@ class Jarvis:
             self.tools.on_stimulus = self._background_stimulus
         if hasattr(self.tools, "on_tell"):
             self.tools.on_tell = self._tell
+        self.tools.on_telegram = self._telegram_organ
         self._notifiers: list[Notifier] = []
         self.initiative = Initiative(m, m.llm, self.brain.handle_stimulus, self._notify)
         self.speakers = self._make_speakers(self.models_dir)
@@ -194,6 +197,67 @@ class Jarvis:
             except Exception:  # noqa: BLE001
                 log.exception("не удалось отправить сообщение")
 
+    TELEGRAM_SECRET = "telegram_bot_token"
+
+    def _telegram_token(self) -> str:
+        if self.s.telegram_token:
+            return self.s.telegram_token
+        try:
+            return self.vault._load().get(self.TELEGRAM_SECRET, "")
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def start_telegram(self) -> None:
+        """Telegram запускается сам, как только появился токен (Джарвис может положить его в сейф сам)."""
+        if getattr(self, "_tg_thread", None) is not None and self._tg_thread.is_alive():
+            return
+        token = self._telegram_token()
+        if not token:
+            return
+        if time.time() < getattr(self, "_tg_retry_at", 0):
+            return
+
+        def job():
+            import asyncio
+
+            from jarvis.channels import telegram
+
+            try:
+                asyncio.run(telegram.run(self, token=token, standalone=False))
+            except BaseException as exc:  # noqa: BLE001
+                telegram.STATUS.update(running=False, error=f"{type(exc).__name__}: {exc}"[:300])
+                log.warning("Telegram не запустился: %s", exc)
+                self._tg_retry_at = time.time() + 300
+
+        self._tg_thread = threading.Thread(target=job, name="jarvis-telegram", daemon=True)
+        self._tg_thread.start()
+
+    def _telegram_organ(self, person_id: str, op: str, value: str = "") -> str:
+        """Орган telegram: status | set_token | link — подключить Telegram самому, без правки файлов."""
+        from jarvis.channels import telegram
+        from jarvis.channels.http_api import create_token
+
+        if op == "set_token":
+            if not re.fullmatch(r"\d{6,12}:[\w-]{30,}", value.strip()):
+                return "Это не похоже на токен бота (вида 123456789:AA…). Его выдаёт @BotFather."
+            self.vault.set(self.TELEGRAM_SECRET, value.strip())
+            self._tg_retry_at = 0
+            self.start_telegram()
+            return "Токен сохранён в сейфе, запускаю Telegram. Через минуту проверь status."
+        if op == "link":
+            st = telegram.STATUS
+            if not st.get("running"):
+                return f"Telegram ещё не работает: {st.get('error') or 'нет токена бота'}."
+            code = create_token(self.memory, person_id, "telegram")
+            return f"Ссылка для привязки (открыть в Telegram и нажать «Старт»): https://t.me/{st['bot']}?start={code}"
+        st = telegram.STATUS
+        if st.get("running"):
+            return f"Telegram работает: бот @{st['bot']}."
+        if not self._telegram_token():
+            return "Токена бота нет. Его выдаёт @BotFather (/newbot) — попроси человека прислать токен."
+        return (f"Telegram не запущен: {st.get('error') or 'запускается'}. Если это таймаут — сервер не достаёт "
+                "до api.telegram.org (блокировка); нужен TELEGRAM_PROXY или TELEGRAM_API_BASE в .env.")
+
     def _background_stimulus(self, person_id: str, reason: str) -> None:
         """Фоновая задача закончилась (или другое внутреннее событие органа): подумать и, если нужно, сказать."""
         def job():
@@ -288,8 +352,11 @@ class Jarvis:
             self.call.start()
             log.info("живой разговор слушает порт %s", self.call.port)
 
+        self.start_telegram()
+
         def loop():
             while not self._stop.wait(interval_s):
+                self.start_telegram()  # токен мог появиться в сейфе
                 try:
                     self.pulse()
                 except Exception:  # noqa: BLE001 — пульс не должен умирать от одной ошибки
